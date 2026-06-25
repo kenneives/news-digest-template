@@ -1,0 +1,22 @@
+# Environment and secrets
+.env
+API.txt
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Audio output
+audio/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude Code
+.claude/
