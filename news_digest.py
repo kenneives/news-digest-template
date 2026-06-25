@@ -308,7 +308,7 @@ def save_history(history: dict) -> None:
         return
 
     # Optionally sync history to a remote host (best-effort; skipped if unconfigured)
-    sync_digest_to_ec2()
+    sync_digest_to_remote()
 
 
 def _alert_remote_sync_failure(detail: str) -> None:
@@ -324,7 +324,7 @@ def _alert_remote_sync_failure(detail: str) -> None:
         print(f"⚠️ Could not send remote-sync alert email: {e}")
 
 
-def sync_digest_to_ec2() -> None:
+def sync_digest_to_remote() -> None:
     """Optionally copy digest_history.json to a remote host via scp.
 
     Non-blocking, best-effort — if it fails (or no host is configured) the
