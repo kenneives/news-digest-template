@@ -855,6 +855,35 @@ def _is_transient_claude_error(e) -> bool:
     return "overloaded" in blob or "rate_limit" in blob
 
 
+def _extract_text(message) -> str:
+    """Return the digest text from a Claude message.
+
+    With extended-thinking models (e.g. Opus 4.8) the first content block is a
+    ThinkingBlock, which has no `.text`. Blindly reading `content[0].text` then
+    crashes with "'ThinkingBlock' object has no attribute 'text'". Instead we
+    concatenate every block that actually carries text (type == "text" or a
+    real `.text` attribute) and skip thinking/redacted_thinking/tool blocks.
+    """
+    parts = []
+    for block in message.content:
+        if getattr(block, "type", None) == "text":
+            parts.append(block.text)
+        elif getattr(block, "type", None) in ("thinking", "redacted_thinking"):
+            continue
+        else:
+            text = getattr(block, "text", None)
+            if isinstance(text, str):
+                parts.append(text)
+    result = "".join(parts).strip()
+    if not result:
+        types = ", ".join(getattr(b, "type", "?") for b in message.content) or "none"
+        raise ValueError(
+            f"Claude returned no text content (blocks: {types}); "
+            "cannot build digest."
+        )
+    return result
+
+
 def summarize_with_claude(articles: list[Article]) -> str:
     """Use Claude to create a personalized digest summary."""
 
@@ -1213,7 +1242,7 @@ HTML RULES:
     if last_error is not None:
         raise last_error
 
-    html_content = message.content[0].text
+    html_content = _extract_text(message)
 
     # Clean up any markdown that slipped through
     html_content = clean_markdown_to_html(html_content)
