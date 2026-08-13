@@ -683,6 +683,53 @@ def fetch_reddit_thread_details(
 # Claude Summarization
 # =============================================================================
 
+class _Tee:
+    """Mirror a stream into the log file. Both sides are best-effort — a
+    console encoding error or a locked log file must never kill the digest."""
+
+    def __init__(self, stream, logfile):
+        self._stream = stream
+        self._log = logfile
+
+    def write(self, data):
+        try:
+            if self._stream is not None:
+                self._stream.write(data)
+        except Exception:
+            pass
+        try:
+            self._log.write(data)
+        except Exception:
+            pass
+        return len(data)
+
+    def flush(self):
+        for s in (self._stream, self._log):
+            try:
+                if s is not None:
+                    s.flush()
+            except Exception:
+                pass
+
+
+def setup_run_log() -> None:
+    """Append stdout/stderr to LOG_FILE for the rest of the run, so scheduled
+    runs are diagnosable even when the scheduler discards console output.
+    Set NEWS_DIGEST_SELF_LOG=false to disable (e.g. when a wrapper script
+    already redirects output to the same file)."""
+    if os.getenv("NEWS_DIGEST_SELF_LOG", "true").lower() != "true":
+        return
+    try:
+        log_path = os.getenv("LOG_FILE", str(DEFAULT_LOG_FILE))
+        log = open(log_path, "a", encoding="utf-8", errors="replace")
+        log.write(f"\n===== digest run {datetime.now().isoformat(timespec='seconds')} =====\n")
+        log.flush()
+        sys.stdout = _Tee(sys.stdout, log)
+        sys.stderr = _Tee(sys.stderr, log)
+    except Exception as e:
+        print(f"⚠️ Could not open run log (continuing without): {e}")
+
+
 def cleanup_old_logs(retention_days: int) -> None:
     """Delete rotated log files older than retention_days."""
     if retention_days <= 0:
@@ -1627,6 +1674,7 @@ def send_email(html_content: str, podcast_url: str | None = None, top_topics: li
 
 def main():
     """Main function to generate and send the daily digest."""
+    setup_run_log()
     print(f"\n{'='*60}")
     print(f"Daily News Digest - {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print(f"{'='*60}\n")
