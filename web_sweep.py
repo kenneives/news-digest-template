@@ -23,6 +23,7 @@ Env vars (all optional):
   SWEEP_FORCE                   "true" = run regardless of the weekly gate
   SWEEP_MAX_SEARCHES_PER_LANE   web searches per lane (default: 6)
   SWEEP_MAX_EMAIL_ITEMS         bullet cap in the email section (default: 14)
+  SWEEP_CONCURRENCY             lanes run in parallel (default: 3)
 """
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ import html
 import json
 import os
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 # =============================================================================
@@ -406,25 +408,32 @@ def build_email_section(signals: list[dict], batch_id: str, lane_errors: list[st
 # =============================================================================
 
 def run_sweep(client, model_order: list[str], lanes: list[dict], history: dict):
-    """Run every lane, fold results into history, and return
-    (signals, email_html). Best-effort: lane failures are collected, not
-    raised, and this function itself never raises."""
+    """Run every lane (concurrently — a single research lane takes minutes,
+    so sequential lanes would stretch the digest run), fold results into
+    history, and return (signals, email_html). Best-effort: lane failures are
+    collected, not raised, and this function itself never raises."""
     try:
         batch_id = uuid.uuid4().hex
         today_str = datetime.now().strftime("%Y-%m-%d")
         max_searches = int(os.getenv("SWEEP_MAX_SEARCHES_PER_LANE", "6"))
+        workers = max(1, int(os.getenv("SWEEP_CONCURRENCY", "3")))
         all_signals: list[dict] = []
         lane_errors: list[str] = []
 
-        for lane in lanes:
-            try:
-                raw = run_lane(client, model_order, lane, max_searches)
-                lane_signals = normalize_signals(raw, lane, batch_id, today_str) if raw else []
-                all_signals.extend(lane_signals)
-                print(f"  🔎 sweep lane {lane['key']}: {len(lane_signals)} signals")
-            except Exception as e:
-                lane_errors.append(f"{lane['key']}: {e}")
-                print(f"  ⚠️ sweep lane {lane['key']} failed: {e}")
+        def _do_lane(lane: dict):
+            raw = run_lane(client, model_order, lane, max_searches)
+            return normalize_signals(raw, lane, batch_id, today_str) if raw else []
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [(lane, pool.submit(_do_lane, lane)) for lane in lanes]
+            for lane, future in futures:
+                try:
+                    lane_signals = future.result()
+                    all_signals.extend(lane_signals)
+                    print(f"  🔎 sweep lane {lane['key']}: {len(lane_signals)} signals")
+                except Exception as e:
+                    lane_errors.append(f"{lane['key']}: {e}")
+                    print(f"  ⚠️ sweep lane {lane['key']} failed: {e}")
 
         update_sweep_history(history, all_signals, batch_id)
         section = build_email_section(all_signals, batch_id, lane_errors)

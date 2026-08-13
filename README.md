@@ -113,6 +113,7 @@ the email as a severity-ranked "🔎 Weekly Web Sweep" section and kept in
 | `SWEEP_FORCE` | unset | `true` = run today regardless of the gate (testing) |
 | `SWEEP_MAX_SEARCHES_PER_LANE` | `6` | Web-search budget per lane |
 | `SWEEP_MAX_EMAIL_ITEMS` | `14` | Bullet cap in the email section |
+| `SWEEP_CONCURRENCY` | `3` | Lanes researched in parallel (each lane takes minutes) |
 
 **Cost:** web search is billed at $10 per 1,000 searches plus normal model
 tokens — roughly $0.20-0.40 per lane per week on Sonnet. The two example lanes
