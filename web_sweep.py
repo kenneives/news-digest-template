@@ -206,7 +206,9 @@ def _web_search_tool(version: str, max_searches: int) -> dict:
 def _run_lane_once(client, model: str, prompt: str, ws_version: str, max_searches: int):
     """One lane pass on one model. Handles pause_turn continuations.
 
-    Returns the report tool's input dict, or None if the model never called it.
+    Returns the report tool's input dict. A turn that ends WITHOUT the report
+    tool call is an error, never a silent empty — an empty week must arrive as
+    an explicit signals:[] report, so "quiet" and "broken" stay distinguishable.
     """
     tools = [_web_search_tool(ws_version, max_searches), REPORT_SIGNALS_TOOL]
     messages = [{"role": "user", "content": prompt}]
@@ -215,7 +217,7 @@ def _run_lane_once(client, model: str, prompt: str, ws_version: str, max_searche
         # Stream and accumulate: a web-search research turn can run for
         # minutes, and a non-streaming call hits the SDK HTTP timeout.
         with client.messages.stream(
-            model=model, max_tokens=8192, tools=tools, messages=messages,
+            model=model, max_tokens=16384, tools=tools, messages=messages,
         ) as stream:
             response = stream.get_final_message()
         if response.stop_reason == "pause_turn":
@@ -226,12 +228,14 @@ def _run_lane_once(client, model: str, prompt: str, ws_version: str, max_searche
             continue
         break
 
-    if response is None:
-        return None
     for block in response.content:
         if getattr(block, "type", "") == "tool_use" and getattr(block, "name", "") == REPORT_SIGNALS_TOOL["name"]:
             return block.input
-    return None
+    block_types = [getattr(b, "type", "?") for b in response.content]
+    raise RuntimeError(
+        f"model {model} never called {REPORT_SIGNALS_TOOL['name']} "
+        f"(stop_reason={response.stop_reason}, blocks={block_types[-4:]})"
+    )
 
 
 def run_lane(client, model_order: list[str], lane: dict, max_searches: int):
@@ -422,15 +426,17 @@ def run_sweep(client, model_order: list[str], lanes: list[dict], history: dict):
 
         def _do_lane(lane: dict):
             raw = run_lane(client, model_order, lane, max_searches)
-            return normalize_signals(raw, lane, batch_id, today_str) if raw else []
+            n_raw = len(raw.get("signals", [])) if isinstance(raw, dict) else 0
+            return normalize_signals(raw, lane, batch_id, today_str), n_raw
 
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = [(lane, pool.submit(_do_lane, lane)) for lane in lanes]
             for lane, future in futures:
                 try:
-                    lane_signals = future.result()
+                    lane_signals, n_raw = future.result()
                     all_signals.extend(lane_signals)
-                    print(f"  🔎 sweep lane {lane['key']}: {len(lane_signals)} signals")
+                    print(f"  🔎 sweep lane {lane['key']}: {n_raw} reported → "
+                          f"{len(lane_signals)} kept after grounding checks")
                 except Exception as e:
                     lane_errors.append(f"{lane['key']}: {e}")
                     print(f"  ⚠️ sweep lane {lane['key']} failed: {e}")
@@ -443,3 +449,49 @@ def run_sweep(client, model_order: list[str], lanes: list[dict], history: dict):
     except Exception as e:
         print(f"⚠️ Web sweep failed entirely (digest unaffected): {e}")
         return [], ""
+
+
+# =============================================================================
+# Standalone test mode:  python web_sweep.py [lane_key ...]
+# Runs lanes and prints results. No email, no history writes, no ledger.
+# =============================================================================
+
+if __name__ == "__main__":
+    import sys
+
+    import anthropic
+
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+    except ImportError:
+        pass  # fine if ANTHROPIC_API_KEY is already in the environment
+
+    try:
+        import sweep_lanes_private
+        lanes = sweep_lanes_private.get_lanes()
+    except ImportError:
+        lanes = EXAMPLE_LANES
+    if sys.argv[1:]:
+        lanes = [l for l in lanes if l["key"] in sys.argv[1:]]
+        if not lanes:
+            sys.exit(f"no lanes match {sys.argv[1:]}")
+
+    _client = anthropic.Anthropic()
+    try:  # resolve models exactly like the production digest run
+        from news_digest import resolve_model_order
+        _models = resolve_model_order(_client)
+    except Exception as _e:
+        print(f"(model resolution unavailable: {_e} — using default)")
+        _models = []
+    print(f"Testing {len(lanes)} lane(s) on models {_models or ['claude-sonnet-4-6']}: "
+          f"{', '.join(l['key'] for l in lanes)}")
+    _signals, _html = run_sweep(_client, _models, lanes, history={})
+    for _s in sorted(_signals, key=lambda s: SEVERITY_ORDER.get(s["severity"], 2)):
+        print(f"\n[{_s['severity']}] ({_s['lane']}) {_s['subject']}")
+        print(f"  {_s['summary']}")
+        if _s["relevance"]:
+            print(f"  → {_s['relevance']}")
+        print(f"  {_s['source_url']}")
+    print(f"\n{len(_signals)} signals total; email section {len(_html)} chars. "
+          "(Nothing was saved or emailed — test mode.)")
