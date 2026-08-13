@@ -8,6 +8,7 @@ Fork it, drop in your API keys, edit the `INTERESTS` / reader profile / RSS feed
 
 - **50+ RSS sources** across tech, AI, robotics, finance, fintech, crypto, legal/regulatory, science, health, climate, automotive, global news, US news, local news, and more
 - **Claude summarization** — filters hundreds of articles down to the best 20-30, organized by topic and prioritized by your configured interests
+- **Weekly web-grounded sweeps (optional)** — Claude + server-side web search hunts lanes of intel RSS can't see (crowdfunding, storefront charts, niche launches), every finding grounded in a source URL
 - **Two-host AI podcast** — generates a natural conversation between hosts "Alex" and "Sam" from the digest
 - **Multi-voice TTS** — ElevenLabs (premium) with automatic Edge-TTS fallback
 - **Audiobookshelf integration** — auto-uploads podcast episodes for streaming
@@ -38,6 +39,7 @@ RSS Feeds (50+)
 | File | Purpose |
 |------|---------|
 | `news_digest.py` | Main entry point — fetches RSS, calls Claude, sends email, orchestrates podcast pipeline |
+| `web_sweep.py` | Optional weekly web-grounded sweep engine — per-lane Claude + web_search passes reporting structured, source-linked signals |
 | `podcast_generator.py` | Generates a two-host podcast script via local LLM (Ollama/LM Studio) |
 | `audio_generator.py` | Converts script segments to multi-voice MP3 with pydub assembly |
 | `audiobookshelf_client.py` | Triggers Audiobookshelf library scan and provides podcast URL for email |
@@ -84,6 +86,37 @@ python news_digest.py
 ```
 
 This fetches news, generates the digest email, and (if the podcast is configured) generates and uploads a podcast episode.
+
+---
+
+## Weekly Web Sweep (Optional)
+
+RSS only surfaces what the press publishes. The sweep goes hunting: once a week
+(inside the normal daily run), each configured "lane" hands Claude a research
+brief plus the server-side `web_search` tool. Claude must report findings
+through a structured tool call with a **required source URL** — anything it
+can't ground in a page it actually visited is dropped. Results are appended to
+the email as a severity-ranked "🔎 Weekly Web Sweep" section and kept in
+`digest_history.json` (rolling ~45 days).
+
+- Severity tiers: 🔴 `act_now` (respond this week) · 🟡 `notable` (worth 30
+  seconds) · ▫️ `info` (background). The prompt calibrates hard against crying
+  wolf — most weeks have zero `act_now` items.
+- Lanes are plain dicts — see `EXAMPLE_LANES` in `web_sweep.py` and replace
+  them with your own briefs (competitors, price anchors, niche launches…).
+- Failures never block the digest; a failed lane is noted in the section footer.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SWEEP_ENABLED` | `false` | Master switch |
+| `SWEEP_DAY` | `monday` | Weekday the weekly sweep runs (first run happens immediately) |
+| `SWEEP_FORCE` | unset | `true` = run today regardless of the gate (testing) |
+| `SWEEP_MAX_SEARCHES_PER_LANE` | `6` | Web-search budget per lane |
+| `SWEEP_MAX_EMAIL_ITEMS` | `14` | Bullet cap in the email section |
+
+**Cost:** web search is billed at $10 per 1,000 searches plus normal model
+tokens — roughly $0.20-0.40 per lane per week on Sonnet. The two example lanes
+cost well under $1/month.
 
 ---
 

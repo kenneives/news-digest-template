@@ -33,6 +33,13 @@ from audio_generator import cleanup_old_audio, generate_audio
 from audiobookshelf_client import get_podcast_url, trigger_library_scan
 from podcast_generator import extract_text_from_html, generate_podcast_script, parse_script
 
+# Weekly web-grounded sweep (optional): Claude + server-side web_search hunts
+# lanes of intel RSS can't see. Define your own lanes in web_sweep.py.
+try:
+    import web_sweep
+except ImportError:
+    web_sweep = None
+
 load_dotenv()
 
 # History file to track sent articles (prevents duplicates)
@@ -1720,6 +1727,23 @@ def main():
             sys.exit(1)
 
         print("✓ Digest generated\n")
+
+        # Step 2b: Weekly web-grounded sweep (optional; never fails the digest).
+        # Off by default — set SWEEP_ENABLED=true and define your lanes in
+        # web_sweep.py (see EXAMPLE_LANES). Appends a severity-ranked section
+        # after Claude's digest, so the podcast narrates it too.
+        if web_sweep is not None and os.getenv("SWEEP_ENABLED", "false").lower() == "true":
+            try:
+                if web_sweep.should_run_sweep(history):
+                    print("🔎 Running weekly web sweep...")
+                    sweep_client = anthropic.Anthropic()
+                    sweep_models = resolve_model_order(sweep_client)
+                    _sweep_signals, sweep_html = web_sweep.run_sweep(
+                        sweep_client, sweep_models, web_sweep.EXAMPLE_LANES, history)
+                    if sweep_html:
+                        digest_html += "\n" + sweep_html
+            except Exception as e:
+                print(f"⚠️ Web sweep failed (digest unaffected): {e}")
 
         # Step 3: Podcast Audio Pipeline
         podcast_url = None
