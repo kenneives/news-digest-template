@@ -362,11 +362,14 @@ def update_sweep_history(history: dict, signals: list[dict], batch_id: str, days
 # Email section
 # =============================================================================
 
-def build_email_section(signals: list[dict], batch_id: str, lane_errors: list[str]) -> str:
+def build_email_section(signals: list[dict], batch_id: str, lane_errors: list[str],
+                        n_repeats: int = 0) -> str:
     """Deterministic HTML section (matches the digest's h2/ul/li structure so
     the email CSS applies). Built in code, not by the model, so URLs and
-    numbers arrive exactly as reported."""
-    if not signals and not lane_errors:
+    numbers arrive exactly as reported. `signals` here is the email-facing set
+    (repeats already filtered out); n_repeats keeps the footer honest so an
+    all-repeat week still renders a section instead of a silent empty."""
+    if not signals and not lane_errors and not n_repeats:
         return ""
     max_items = int(os.getenv("SWEEP_MAX_EMAIL_ITEMS", "14"))
     ordered = sorted(signals, key=lambda s: (SEVERITY_ORDER.get(s["severity"], 2), s["topic_label"]))
@@ -401,6 +404,8 @@ def build_email_section(signals: list[dict], batch_id: str, lane_errors: list[st
     )
     if len(signals) > len(shown):
         footer += f" · +{len(signals) - len(shown)} more in history"
+    if n_repeats:
+        footer += f" · {n_repeats} repeat(s) from prior weeks suppressed"
     if lane_errors:
         footer += f" · {len(lane_errors)} lane(s) failed"
     parts.append(f"<p><em>{html.escape(footer)}</em></p>")
@@ -441,10 +446,17 @@ def run_sweep(client, model_order: list[str], lanes: list[dict], history: dict):
                     lane_errors.append(f"{lane['key']}: {e}")
                     print(f"  ⚠️ sweep lane {lane['key']} failed: {e}")
 
+        # Email shows only signals not already in a prior week's history —
+        # the 7-14 day search window overlaps on purpose, so re-finds are
+        # expected. Snapshot prior ids BEFORE the merge; everything still
+        # lands in history and the returned list (ledger dedupes by id).
+        prior_ids = {s.get("id") for s in history.get("web_sweep", [])}
         update_sweep_history(history, all_signals, batch_id)
-        section = build_email_section(all_signals, batch_id, lane_errors)
+        fresh = [s for s in all_signals if s["id"] not in prior_ids]
+        n_repeats = len(all_signals) - len(fresh)
+        section = build_email_section(fresh, batch_id, lane_errors, n_repeats)
         print(f"🔎 Web sweep: {len(all_signals)} signals across {len(lanes)} lanes "
-              f"({len(lane_errors)} failed)")
+              f"({n_repeats} repeats suppressed, {len(lane_errors)} failed)")
         return all_signals, section
     except Exception as e:
         print(f"⚠️ Web sweep failed entirely (digest unaffected): {e}")
