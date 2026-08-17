@@ -1,3 +1,5 @@
+[![AgentAvow Trust](https://agentavow.com/api/v1/public/scan/kenneives/news-digest-template/badge)](https://agentavow.com/check/kenneives/news-digest-template) — signed, offline-verifiable tool-safety grade
+
 # Daily News Digest
 
 A configurable personal daily news digest powered by Claude. A Python pipeline that fetches news from 50+ RSS feeds, uses Claude to create a personalized summary tuned to *your* interests, optionally generates a two-host AI podcast, and delivers everything via email with an optional Audiobookshelf podcast link.
