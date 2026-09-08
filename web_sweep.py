@@ -22,7 +22,7 @@ Env vars (all optional):
   SWEEP_DAY                     weekday to run on (default: monday)
   SWEEP_FORCE                   "true" = run regardless of the weekly gate
   SWEEP_MAX_SEARCHES_PER_LANE   web searches per lane (default: 6)
-  SWEEP_MAX_EMAIL_ITEMS         bullet cap in the email section (default: 14)
+  SWEEP_MAX_EMAIL_ITEMS         bullet cap in the email section (default: 18)
   SWEEP_CONCURRENCY             lanes run in parallel (default: 3)
 """
 
@@ -342,9 +342,13 @@ def should_run_sweep(history: dict, force: bool = False) -> bool:
     return today.strftime("%A").lower() == sweep_day or days_since >= 8
 
 
-def update_sweep_history(history: dict, signals: list[dict], batch_id: str, days: int = 45) -> dict:
+def update_sweep_history(history: dict, signals: list[dict], batch_id: str, days: int = 45,
+                         lane_stats: list[dict] | None = None,
+                         lane_errors: list[str] | None = None) -> dict:
     """Merge signals into history['web_sweep'] (rolling ~45 days, deduped by id)
-    and stamp the weekly gate. history rides the existing remote sync."""
+    and stamp the weekly gate. history rides the existing remote sync — lane
+    stats/errors are stamped into the meta so a run is diagnosable from the
+    synced copy, not just the local digest.log."""
     merged: dict[str, dict] = {}
     for s in history.get("web_sweep", []) + signals:
         if s.get("id"):
@@ -354,6 +358,8 @@ def update_sweep_history(history: dict, signals: list[dict], batch_id: str, days
     history["web_sweep_meta"] = {
         "last_run_date": datetime.now().strftime("%Y-%m-%d"),
         "last_batch": batch_id,
+        "lanes": lane_stats or [],
+        "lane_errors": lane_errors or [],
     }
     return history
 
@@ -361,6 +367,31 @@ def update_sweep_history(history: dict, signals: list[dict], batch_id: str, days
 # =============================================================================
 # Email section
 # =============================================================================
+
+def _fair_pick(signals: list[dict], max_items: int) -> list[dict]:
+    """Pick up to max_items for the email without starving any section.
+
+    A plain severity-then-label sort lets one busy topic fill the whole cap
+    (the alphabetically-last section can get fully cut on a busy week).
+    Instead: walk severity tiers in order, round-robining across topic_labels
+    within each tier, then re-sort the picks for grouped display.
+    """
+    by_tier: dict[int, dict[str, list[dict]]] = {}
+    for s in signals:
+        tier = SEVERITY_ORDER.get(s["severity"], 2)
+        by_tier.setdefault(tier, {}).setdefault(s["topic_label"], []).append(s)
+    picked: list[dict] = []
+    for tier in sorted(by_tier):
+        groups = [by_tier[tier][label] for label in sorted(by_tier[tier])]
+        while len(picked) < max_items and any(groups):
+            for grp in groups:
+                if grp and len(picked) < max_items:
+                    picked.append(grp.pop(0))
+        if len(picked) >= max_items:
+            break
+    return sorted(picked, key=lambda s: (s["topic_label"],
+                                         SEVERITY_ORDER.get(s["severity"], 2)))
+
 
 def build_email_section(signals: list[dict], batch_id: str, lane_errors: list[str],
                         n_repeats: int = 0) -> str:
@@ -371,9 +402,8 @@ def build_email_section(signals: list[dict], batch_id: str, lane_errors: list[st
     all-repeat week still renders a section instead of a silent empty."""
     if not signals and not lane_errors and not n_repeats:
         return ""
-    max_items = int(os.getenv("SWEEP_MAX_EMAIL_ITEMS", "14"))
-    ordered = sorted(signals, key=lambda s: (SEVERITY_ORDER.get(s["severity"], 2), s["topic_label"]))
-    shown = ordered[:max_items]
+    max_items = int(os.getenv("SWEEP_MAX_EMAIL_ITEMS", "18"))
+    shown = _fair_pick(signals, max_items)
 
     parts = ["<h2>🔎 Weekly Web Sweep</h2>"]
     current_label = None
@@ -428,6 +458,7 @@ def run_sweep(client, model_order: list[str], lanes: list[dict], history: dict):
         workers = max(1, int(os.getenv("SWEEP_CONCURRENCY", "3")))
         all_signals: list[dict] = []
         lane_errors: list[str] = []
+        lane_stats: list[dict] = []
 
         def _do_lane(lane: dict):
             raw = run_lane(client, model_order, lane, max_searches)
@@ -440,6 +471,8 @@ def run_sweep(client, model_order: list[str], lanes: list[dict], history: dict):
                 try:
                     lane_signals, n_raw = future.result()
                     all_signals.extend(lane_signals)
+                    lane_stats.append({"lane": lane["key"], "reported": n_raw,
+                                       "kept": len(lane_signals)})
                     print(f"  🔎 sweep lane {lane['key']}: {n_raw} reported → "
                           f"{len(lane_signals)} kept after grounding checks")
                 except Exception as e:
@@ -451,7 +484,8 @@ def run_sweep(client, model_order: list[str], lanes: list[dict], history: dict):
         # expected. Snapshot prior ids BEFORE the merge; everything still
         # lands in history and the returned list (ledger dedupes by id).
         prior_ids = {s.get("id") for s in history.get("web_sweep", [])}
-        update_sweep_history(history, all_signals, batch_id)
+        update_sweep_history(history, all_signals, batch_id,
+                             lane_stats=lane_stats, lane_errors=lane_errors)
         fresh = [s for s in all_signals if s["id"] not in prior_ids]
         n_repeats = len(all_signals) - len(fresh)
         section = build_email_section(fresh, batch_id, lane_errors, n_repeats)
