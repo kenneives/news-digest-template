@@ -22,6 +22,7 @@ from email.mime.text import MIMEText
 from pathlib import Path
 from typing import Optional
 import re
+import urllib.parse
 
 import anthropic
 import feedparser
@@ -282,6 +283,27 @@ RSS_FEEDS = {
 # Duplicate Detection
 # =============================================================================
 
+# Daily watch feeds: Google News RSS queries for the names you track
+# (competitors, partners, your own company). Free, keyless, and same-day —
+# a weekly research sweep can't beat that latency. Each query becomes one
+# source; group a few names per query and keep common words qualified
+# (a bare company name that is also an ordinary word returns junk).
+WATCH_QUERIES: list[tuple[str, str]] = [
+    # ("Watch (Acme, Example Co)", '("Acme AI" OR "Example Co") (product OR funding OR launch)'),
+]
+WATCH_QUERY_WINDOW = "when:2d"  # Google News recency operator; the 24h filter in fetch_rss_feed does the rest
+
+
+def google_news_rss_url(query: str) -> str:
+    return "https://news.google.com/rss/search?" + urllib.parse.urlencode(
+        {"q": f"{query} {WATCH_QUERY_WINDOW}", "hl": "en-US", "gl": "US", "ceid": "US:en"})
+
+
+def watch_feeds() -> list[tuple[str, str]]:
+    """(source name, RSS URL) for every watch query."""
+    return [(name, google_news_rss_url(q)) for name, q in WATCH_QUERIES]
+
+
 def get_article_hash(article: Article) -> str:
     """Generate a unique hash for an article based on title and link."""
     unique_str = f"{article.title.lower().strip()}|{article.link.lower().strip()}"
@@ -506,6 +528,14 @@ def fetch_rss_feed(name: str, url: str, max_articles: int = 5) -> list[Article]:
                 summary = entry.summary[:500]  # Truncate long summaries
             elif hasattr(entry, 'description'):
                 summary = entry.description[:500]
+            if "news.google.com" in entry.get('link', ''):
+                # Google News summaries are an HTML list of related links —
+                # useless to the model. Name the outlet instead.
+                src = entry.get('source')
+                outlet = src.get('title', '') if isinstance(src, dict) else ''
+                summary = (f"Watch-feed hit via Google News"
+                           f"{' (outlet: ' + outlet + ')' if outlet else ''}. "
+                           "Judge on the merits — a name match is not news by itself.")
 
             articles.append(Article(
                 title=entry.get('title', 'No title'),
@@ -564,6 +594,13 @@ def fetch_all_news() -> list[Article]:
     for name, url in RSS_FEEDS.items():
         if name == "Hacker News":
             continue  # We'll use the API instead
+        print(f"Fetching {name}...")
+        articles = fetch_rss_feed(name, url, max_per_source)
+        all_articles.extend(articles)
+        print(f"  Got {len(articles)} articles")
+
+    # Daily watch feeds (Google News queries for tracked names)
+    for name, url in watch_feeds():
         print(f"Fetching {name}...")
         articles = fetch_rss_feed(name, url, max_per_source)
         all_articles.extend(articles)

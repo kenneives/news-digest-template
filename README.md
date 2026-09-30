@@ -107,6 +107,12 @@ the email as a severity-ranked "🔎 Weekly Web Sweep" section and kept in
 - Lanes are plain dicts — see `EXAMPLE_LANES` in `web_sweep.py` and replace
   them with your own briefs (competitors, price anchors, niche launches…).
 - Failures never block the digest; a failed lane is noted in the section footer.
+- Repeats are suppressed by story, not just by subject: the same page via a
+  share link, or the same one-off event (a funding round, a campaign launch)
+  from a second outlet, stays out of the email. Each lane's prompt also lists
+  what it already reported in the last 4 weeks.
+- An `act_now` about an event older than 14 days is downgraded to `notable`
+  and tagged "catch-up" — a three-month-old funding round is not urgent.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -116,10 +122,32 @@ the email as a severity-ranked "🔎 Weekly Web Sweep" section and kept in
 | `SWEEP_MAX_SEARCHES_PER_LANE` | `6` | Web-search budget per lane |
 | `SWEEP_MAX_EMAIL_ITEMS` | `14` | Bullet cap in the email section |
 | `SWEEP_CONCURRENCY` | `3` | Lanes researched in parallel (each lane takes minutes) |
+| `SWEEP_ACT_NOW_MAX_AGE_DAYS` | `14` | Older `act_now` signals become `notable` + catch-up |
+| `SWEEP_PRIOR_SUBJECTS_DAYS` | `28` | Window of already-reported subjects fed back into each lane prompt |
 
 **Cost:** web search is billed at $10 per 1,000 searches plus normal model
 tokens — roughly $0.20-0.40 per lane per week on Sonnet. The two example lanes
 cost well under $1/month.
+
+---
+
+## Daily Watch Feeds (Optional)
+
+A weekly sweep has a five-day latency ceiling. For names you care about
+(competitors, partners, your own company), a Google News RSS query is free,
+needs no key, and lands the same day the press covers it. Add entries to
+`WATCH_QUERIES` in `news_digest.py`:
+
+```python
+WATCH_QUERIES = [
+    ("Watch (Acme, Example Co)", '("Acme AI" OR "Example Co") (product OR funding OR launch)'),
+]
+```
+
+Each query becomes one source in the daily fetch. Group a few names per query,
+and qualify any name that is also an ordinary word — `"Board"` alone returns
+lumber and corporate boards. Hits arrive with the outlet name as the summary
+and a note telling the model that a name match is not news by itself.
 
 ---
 

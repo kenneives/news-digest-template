@@ -24,6 +24,10 @@ Env vars (all optional):
   SWEEP_MAX_SEARCHES_PER_LANE   web searches per lane (default: 6)
   SWEEP_MAX_EMAIL_ITEMS         bullet cap in the email section (default: 18)
   SWEEP_CONCURRENCY             lanes run in parallel (default: 3)
+  SWEEP_ACT_NOW_MAX_AGE_DAYS    act_now older than this (by observed_at) is
+                                downgraded to notable + flagged catch_up (default: 14)
+  SWEEP_PRIOR_SUBJECTS_DAYS     window of already-reported subjects fed back
+                                into each lane prompt (default: 28)
 """
 
 from __future__ import annotations
@@ -32,9 +36,11 @@ import hashlib
 import html
 import json
 import os
+import re
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from urllib.parse import parse_qsl, urlencode, urlsplit
 
 # =============================================================================
 # Severity + example lanes
@@ -168,7 +174,7 @@ REPORT_SIGNALS_TOOL = {
 }
 
 
-def build_lane_prompt(lane: dict, now_iso: str) -> str:
+def build_lane_prompt(lane: dict, now_iso: str, prior_subjects: list[str] | None = None) -> str:
     lines = [
         "You run a weekly web-grounded intelligence sweep for a personal news "
         "digest. Sweep ONE lane and report structured signals.",
@@ -192,6 +198,16 @@ def build_lane_prompt(lane: dict, now_iso: str) -> str:
     extra = lane.get("extra_rules")
     if extra:
         lines.extend(["", extra])
+    if prior_subjects:
+        # Weekly search windows overlap on purpose; without this the model
+        # re-finds the same Kickstarter three weeks running.
+        lines.extend([
+            "",
+            "ALREADY REPORTED in recent weeks — do NOT report these again unless "
+            "there is a genuinely NEW development (a new date, number, price, or "
+            "product), and then say what's new in the summary:",
+        ])
+        lines.extend(f"- {subj}" for subj in prior_subjects)
     return "\n".join(lines)
 
 
@@ -238,10 +254,11 @@ def _run_lane_once(client, model: str, prompt: str, ws_version: str, max_searche
     )
 
 
-def run_lane(client, model_order: list[str], lane: dict, max_searches: int):
+def run_lane(client, model_order: list[str], lane: dict, max_searches: int,
+             prior_subjects: list[str] | None = None):
     """Run one lane, trying models in order and downgrading the web_search tool
     version for models that don't support the newer one. Raises on total failure."""
-    prompt = build_lane_prompt(lane, datetime.now().strftime("%Y-%m-%d"))
+    prompt = build_lane_prompt(lane, datetime.now().strftime("%Y-%m-%d"), prior_subjects)
     last_error: Exception | None = None
     for model in (model_order or ["claude-sonnet-4-6"]):
         for ws_version in ("web_search_20260209", "web_search_20250305"):
@@ -273,12 +290,87 @@ def signal_id(subject: str, url: str) -> str:
     return hashlib.md5(unique.encode()).hexdigest()
 
 
-def normalize_signals(raw, lane: dict, batch_id: str, today_str: str) -> list[dict]:
+# Story-level dedup keys. signal_id (subject|url) is the storage identity, but
+# the model rewrites subjects week to week, so repeats are detected on the
+# normalized URL and on (entity, signal_type, month) as well.
+_TRACKING_PARAM_RE = re.compile(
+    r"^(utm_|ref$|ref_|fbclid|gclid|mc_cid|mc_eid|igshid|cmpid|ncid|si$|s$|source$|share)",
+    re.IGNORECASE,
+)
+
+
+def normalize_url(url: str) -> str:
+    """Host + path + non-tracking query, lowercase host, no www/fragment/trailing
+    slash — so the same article via two share links is one story."""
+    try:
+        p = urlsplit(url.strip())
+    except ValueError:
+        return url.strip().lower()
+    host = p.netloc.lower()
+    host = host[4:] if host.startswith("www.") else host
+    path = re.sub(r"/+$", "", p.path) or "/"
+    query = sorted((k, v) for k, v in parse_qsl(p.query, keep_blank_values=True)
+                   if not _TRACKING_PARAM_RE.match(k))
+    return host + path + (f"?{urlencode(query)}" if query else "")
+
+
+def entity_key(entity: str, canonicalize=None) -> str:
+    """Lowercase canonical entity. `canonicalize(name) -> canonical | None` is
+    an optional hook (e.g. a private alias list); the generic fallback strips
+    parentheticals and takes the first ' / '-separated name."""
+    if not entity:
+        return ""
+    if canonicalize is not None:
+        try:
+            canon = canonicalize(entity)
+        except Exception:
+            canon = None
+        if canon:
+            return canon.lower()
+    e = re.sub(r"\(.*?\)", " ", entity.lower()).split(" / ")[0]
+    e = re.sub(r"[^\w.&+ ]+", " ", e)
+    return " ".join(e.split())
+
+
+# Event types that happen at most once per entity per month, so a second
+# outlet's coverage is the same story. Launches/updates are NOT here — a
+# company can ship twice in a month and both are news.
+_EVENT_DEDUP_TYPES = {"funding_round", "acquisition", "ipo", "shutdown",
+                      "campaign_launch", "campaign_end", "layoffs"}
+
+
+def event_key(signal: dict) -> str:
+    """(entity, signal_type, observed month) for one-off event types — the
+    same funding round from a second outlet is a repeat, not news."""
+    ek = signal.get("entity_key") or ""
+    obs = signal.get("observed_at") or ""
+    stype = (signal.get("signal_type") or "").lower()
+    if ek and len(obs) >= 7 and stype in _EVENT_DEDUP_TYPES:
+        return f"{ek}|{stype}|{obs[:7]}"
+    return ""
+
+
+def _keys_for(signal: dict, canonicalize=None) -> tuple[str, str, str]:
+    """(id, url_key, event_key) for any signal, including pre-dedup history
+    rows that lack the stored keys."""
+    url_key = signal.get("url_key") or normalize_url(signal.get("source_url", ""))
+    if not signal.get("entity_key"):
+        signal = dict(signal, entity_key=entity_key(signal.get("entity", ""), canonicalize))
+    return signal.get("id", ""), url_key, event_key(signal)
+
+
+def normalize_signals(raw, lane: dict, batch_id: str, today_str: str,
+                      canonicalize=None) -> list[dict]:
     """Turn a raw report_sweep_signals payload into stored signals, dropping
     ungrounded entries (no subject/summary/http source URL) and deduping by
-    subject+type. Never throws."""
+    subject+type. Applies the act_now age rule. Never throws."""
     signals: list[dict] = []
     seen: set[str] = set()
+    max_age = int(os.getenv("SWEEP_ACT_NOW_MAX_AGE_DAYS", "14"))
+    try:
+        today = datetime.strptime(today_str, "%Y-%m-%d")
+    except ValueError:
+        today = datetime.now()
     items = raw.get("signals") if isinstance(raw, dict) else None
     for entry in items if isinstance(items, list) else []:
         s = entry if isinstance(entry, dict) else {}
@@ -293,7 +385,21 @@ def normalize_signals(raw, lane: dict, batch_id: str, today_str: str) -> list[di
         seen.add(key)
         severity = _clean(s.get("severity"))
         observed = _clean(s.get("observed_at"))
+        observed = observed if len(observed) == 10 else ""
         metrics = s.get("metrics")
+        # Age rule: an event older than max_age days is never act_now — both
+        # this sweep and QTG's flagged a June funding round as urgent months
+        # later. It stays visible as notable, tagged catch-up.
+        catch_up = False
+        if severity == "act_now" and observed:
+            try:
+                age_days = (today - datetime.strptime(observed, "%Y-%m-%d")).days
+            except ValueError:
+                age_days = 0
+            if age_days > max_age:
+                severity = "notable"
+                catch_up = True
+        entity = _clean(s.get("entity"))
         signals.append({
             "id": signal_id(subject, url),
             "batch": batch_id,
@@ -307,14 +413,38 @@ def normalize_signals(raw, lane: dict, batch_id: str, today_str: str) -> list[di
             "relevance": _clean(s.get("relevance")),
             "source_name": _clean(s.get("source_name")),
             "source_url": url,
-            "observed_at": observed if len(observed) == 10 else "",
+            "observed_at": observed,
             "metrics": metrics if isinstance(metrics, dict) else {},
             "severity": severity if severity in SEVERITY_ORDER else "info",
-            "entity": _clean(s.get("entity")),
+            "catch_up": catch_up,
+            "entity": entity,
+            "entity_key": entity_key(entity, canonicalize),
+            "url_key": normalize_url(url),
             "role": _clean(s.get("role")),
             "bucket": _clean(s.get("bucket")),
         })
     return signals
+
+
+def prior_subjects(history: dict, lane: dict, days: int | None = None, cap: int = 30) -> list[str]:
+    """Subjects already reported for this lane's topic in the last `days`,
+    newest first, for the prompt's ALREADY REPORTED block."""
+    days = days or int(os.getenv("SWEEP_PRIOR_SUBJECTS_DAYS", "28"))
+    cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    topic = lane.get("topic", "general")
+    rows = [s for s in history.get("web_sweep", [])
+            if s.get("topic") == topic and (s.get("date") or "") >= cutoff]
+    rows.sort(key=lambda s: s.get("date", ""), reverse=True)
+    out: list[str] = []
+    seen: set[str] = set()
+    for s in rows:
+        subj = (s.get("subject") or "").strip()
+        if subj and subj.lower() not in seen:
+            seen.add(subj.lower())
+            out.append(subj)
+        if len(out) >= cap:
+            break
+    return out
 
 
 # =============================================================================
@@ -419,9 +549,10 @@ def build_email_section(signals: list[dict], batch_id: str, lane_errors: list[st
         badge = SEVERITY_BADGE.get(s["severity"], "▫️")
         rel = f" — <em>{html.escape(s['relevance'])}</em>" if s["relevance"] else ""
         src = html.escape(s["source_name"] or "source")
+        tag = f"{s['lane']}, catch-up {s['observed_at']}" if s.get("catch_up") else s["lane"]
         parts.append(
             f"<li>{badge} <strong>{html.escape(s['subject'])}</strong> "
-            f"({html.escape(s['lane'])}): {html.escape(s['summary'])}{rel} "
+            f"({html.escape(tag)}): {html.escape(s['summary'])}{rel} "
             f"<a href=\"{html.escape(s['source_url'], quote=True)}\">{src}</a></li>"
         )
     if open_list:
@@ -446,11 +577,16 @@ def build_email_section(signals: list[dict], batch_id: str, lane_errors: list[st
 # Orchestrator
 # =============================================================================
 
-def run_sweep(client, model_order: list[str], lanes: list[dict], history: dict):
+def run_sweep(client, model_order: list[str], lanes: list[dict], history: dict,
+              canonicalize=None):
     """Run every lane (concurrently — a single research lane takes minutes,
     so sequential lanes would stretch the digest run), fold results into
     history, and return (signals, email_html). Best-effort: lane failures are
-    collected, not raised, and this function itself never raises."""
+    collected, not raised, and this function itself never raises.
+
+    `canonicalize(name) -> canonical | None` is an optional hook so a private
+    alias list can fold 'Board / board.fun' and 'board.fun' into one entity
+    for dedup; without it a generic normalization is used."""
     try:
         batch_id = uuid.uuid4().hex
         today_str = datetime.now().strftime("%Y-%m-%d")
@@ -461,9 +597,10 @@ def run_sweep(client, model_order: list[str], lanes: list[dict], history: dict):
         lane_stats: list[dict] = []
 
         def _do_lane(lane: dict):
-            raw = run_lane(client, model_order, lane, max_searches)
+            raw = run_lane(client, model_order, lane, max_searches,
+                           prior_subjects(history, lane))
             n_raw = len(raw.get("signals", [])) if isinstance(raw, dict) else 0
-            return normalize_signals(raw, lane, batch_id, today_str), n_raw
+            return normalize_signals(raw, lane, batch_id, today_str, canonicalize), n_raw
 
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = [(lane, pool.submit(_do_lane, lane)) for lane in lanes]
@@ -481,12 +618,25 @@ def run_sweep(client, model_order: list[str], lanes: list[dict], history: dict):
 
         # Email shows only signals not already in a prior week's history —
         # the 7-14 day search window overlaps on purpose, so re-finds are
-        # expected. Snapshot prior ids BEFORE the merge; everything still
-        # lands in history and the returned list (ledger dedupes by id).
-        prior_ids = {s.get("id") for s in history.get("web_sweep", [])}
+        # expected. A repeat is the same id, the same story URL, or the same
+        # (entity, type, month) event. Snapshot prior keys BEFORE the merge;
+        # everything still lands in history and the returned list (ledger
+        # dedupes by id).
+        prior_ids: set[str] = set()
+        prior_urls: set[str] = set()
+        prior_events: set[str] = set()
+        for s in history.get("web_sweep", []):
+            pid, purl, pev = _keys_for(s, canonicalize)
+            prior_ids.add(pid)
+            prior_urls.add(purl)
+            if pev:
+                prior_events.add(pev)
         update_sweep_history(history, all_signals, batch_id,
                              lane_stats=lane_stats, lane_errors=lane_errors)
-        fresh = [s for s in all_signals if s["id"] not in prior_ids]
+        fresh = [s for s in all_signals
+                 if s["id"] not in prior_ids
+                 and s["url_key"] not in prior_urls
+                 and (not event_key(s) or event_key(s) not in prior_events)]
         n_repeats = len(all_signals) - len(fresh)
         section = build_email_section(fresh, batch_id, lane_errors, n_repeats)
         print(f"🔎 Web sweep: {len(all_signals)} signals across {len(lanes)} lanes "
@@ -513,9 +663,11 @@ if __name__ == "__main__":
     except ImportError:
         pass  # fine if ANTHROPIC_API_KEY is already in the environment
 
+    _canon = None
     try:
         import sweep_lanes_private
         lanes = sweep_lanes_private.get_lanes()
+        _canon = getattr(sweep_lanes_private, "canonical_entity", None)
     except ImportError:
         lanes = EXAMPLE_LANES
     if sys.argv[1:]:
@@ -532,7 +684,7 @@ if __name__ == "__main__":
         _models = []
     print(f"Testing {len(lanes)} lane(s) on models {_models or ['claude-sonnet-4-6']}: "
           f"{', '.join(l['key'] for l in lanes)}")
-    _signals, _html = run_sweep(_client, _models, lanes, history={})
+    _signals, _html = run_sweep(_client, _models, lanes, history={}, canonicalize=_canon)
     for _s in sorted(_signals, key=lambda s: SEVERITY_ORDER.get(s["severity"], 2)):
         print(f"\n[{_s['severity']}] ({_s['lane']}) {_s['subject']}")
         print(f"  {_s['summary']}")
