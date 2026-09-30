@@ -387,9 +387,9 @@ def normalize_signals(raw, lane: dict, batch_id: str, today_str: str,
         observed = _clean(s.get("observed_at"))
         observed = observed if len(observed) == 10 else ""
         metrics = s.get("metrics")
-        # Age rule: an event older than max_age days is never act_now — both
-        # this sweep and QTG's flagged a June funding round as urgent months
-        # later. It stays visible as notable, tagged catch-up.
+        # Age rule: an event older than max_age days is never act_now — a
+        # sweep that finds a months-old funding round is late, not urgent.
+        # It stays visible as notable, tagged catch-up.
         catch_up = False
         if severity == "act_now" and observed:
             try:
@@ -585,7 +585,7 @@ def run_sweep(client, model_order: list[str], lanes: list[dict], history: dict,
     collected, not raised, and this function itself never raises.
 
     `canonicalize(name) -> canonical | None` is an optional hook so a private
-    alias list can fold 'Board / board.fun' and 'board.fun' into one entity
+    alias list can fold 'Acme / acme.ai' and 'Acme AI' into one entity
     for dedup; without it a generic normalization is used."""
     try:
         batch_id = uuid.uuid4().hex
