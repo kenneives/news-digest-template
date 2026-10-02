@@ -585,15 +585,165 @@ def fetch_hacker_news_top(max_articles: int = 10) -> list[Article]:
     return articles
 
 
+# =============================================================================
+# Reddit via OAuth (Reddit retires RSS on 2026-11-13; unregistered API access
+# ends March 2027). With a registered script app the digest reads each
+# subreddit's /new listing through oauth.reddit.com instead. Configure:
+#   REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET   from https://www.reddit.com/prefs/apps
+#   REDDIT_USERNAME, REDDIT_PASSWORD         the account that owns the app
+#   REDDIT_USER_AGENT (optional)             e.g. "NewsDigest/1.0 (by /u/you)"
+# Unset = the RSS feeds in RSS_FEEDS are used as before. If an OAuth fetch
+# fails, that subreddit falls back to RSS for the run.
+# =============================================================================
+
+REDDIT_RSS_RETIREMENT = "2026-11-13"
+_REDDIT_TOKEN: dict = {}            # {"value": str, "expires": float}
+_REDDIT_POST_META: dict[str, dict] = {}   # link -> listing fields for the thread cache
+
+
+def reddit_oauth_configured() -> bool:
+    return all(os.getenv(k, "").strip() for k in (
+        "REDDIT_CLIENT_ID", "REDDIT_CLIENT_SECRET", "REDDIT_USERNAME", "REDDIT_PASSWORD"))
+
+
+def _reddit_user_agent() -> str:
+    return os.getenv("REDDIT_USER_AGENT", "").strip() or (
+        f"NewsDigest/1.0 (by /u/{os.getenv('REDDIT_USERNAME', 'unknown').strip()})")
+
+
+def _reddit_oauth_token(force: bool = False) -> Optional[str]:
+    """Password-grant token for a script app; cached for its lifetime.
+    Returns None (and prints why) on failure — never raises."""
+    if not force and _REDDIT_TOKEN.get("value") and time.time() < _REDDIT_TOKEN.get("expires", 0) - 60:
+        return _REDDIT_TOKEN["value"]
+    try:
+        resp = requests.post(
+            "https://www.reddit.com/api/v1/access_token",
+            auth=(os.getenv("REDDIT_CLIENT_ID").strip(), os.getenv("REDDIT_CLIENT_SECRET").strip()),
+            data={"grant_type": "password",
+                  "username": os.getenv("REDDIT_USERNAME").strip(),
+                  "password": os.getenv("REDDIT_PASSWORD").strip()},
+            headers={"User-Agent": _reddit_user_agent()},
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            print(f"  ⚠️ Reddit OAuth token request failed: HTTP {resp.status_code} {resp.text[:120]}")
+            return None
+        body = resp.json()
+        token = body.get("access_token")
+        if not token:
+            print(f"  ⚠️ Reddit OAuth token response had no access_token: {body}")
+            return None
+        _REDDIT_TOKEN["value"] = token
+        _REDDIT_TOKEN["expires"] = time.time() + float(body.get("expires_in", 3600))
+        return token
+    except Exception as e:
+        print(f"  ⚠️ Reddit OAuth token error: {e}")
+        return None
+
+
+def _articles_from_reddit_listing(name: str, data: dict, cutoff: datetime,
+                                  max_articles: int) -> list[Article]:
+    """Turn a /r/<sub>/new listing into Articles (last 24h, newest first) and
+    record the fields the thread cache needs. Pure; safe to unit-test."""
+    articles: list[Article] = []
+    children = (data.get("data") or {}).get("children") or []
+    for child in children:
+        post = child.get("data") or {}
+        permalink = post.get("permalink") or ""
+        if not permalink or post.get("stickied"):
+            continue
+        created = post.get("created_utc")
+        published = (datetime.fromtimestamp(float(created), tz=timezone.utc)
+                     if created else None)
+        if published and published < cutoff:
+            continue
+        link = "https://www.reddit.com" + permalink
+        selftext = (post.get("selftext") or "").strip()
+        summary = selftext[:500] if selftext else (
+            f"Link post → {post.get('url', '')}" if post.get("url") else "")
+        articles.append(Article(
+            title=post.get("title", "No title"),
+            link=link,
+            summary=summary,
+            source=name,
+            published=published,
+        ))
+        _REDDIT_POST_META[link] = {
+            "selftext": selftext[:2000],
+            "author": post.get("author") or "",
+            "score": int(post.get("score") or 0),
+            "num_comments": int(post.get("num_comments") or 0),
+            "subreddit": post.get("subreddit") or "",
+            "created_utc": float(created or 0),
+        }
+        if len(articles) >= max_articles:
+            break
+    return articles
+
+
+def fetch_reddit_oauth(name: str, subreddit: str, max_articles: int) -> Optional[list[Article]]:
+    """Fetch /r/<subreddit>/new via OAuth. Returns None on any failure so the
+    caller can fall back to RSS for that subreddit."""
+    token = _reddit_oauth_token()
+    if not token:
+        return None
+    for attempt in (1, 2):
+        try:
+            resp = requests.get(
+                f"https://oauth.reddit.com/r/{subreddit}/new",
+                params={"limit": min(100, max(25, max_articles * 2)), "raw_json": 1},
+                headers={"Authorization": f"bearer {token}", "User-Agent": _reddit_user_agent()},
+                timeout=20,
+            )
+        except Exception as e:
+            print(f"  ⚠️ {name} OAuth fetch error: {e}")
+            return None
+        if resp.status_code == 401 and attempt == 1:
+            token = _reddit_oauth_token(force=True)
+            if not token:
+                return None
+            continue
+        if resp.status_code != 200:
+            print(f"  ⚠️ {name} OAuth HTTP {resp.status_code} — falling back to RSS")
+            return None
+        try:
+            data = resp.json()
+        except ValueError:
+            print(f"  ⚠️ {name} OAuth returned non-JSON — falling back to RSS")
+            return None
+        cutoff = datetime.now(timezone.utc) - timedelta(days=1)
+        return _articles_from_reddit_listing(name, data, cutoff, max_articles)
+    return None
+
+
+def _subreddit_from_feed_url(url: str) -> Optional[str]:
+    m = re.search(r"reddit\.com/r/([^/]+)/", url)
+    return m.group(1) if m else None
+
+
 def fetch_all_news() -> list[Article]:
     """Fetch news from all configured sources."""
     all_articles = []
     max_per_source = int(os.getenv('MAX_ARTICLES_PER_SOURCE', 20))
+    use_reddit_oauth = reddit_oauth_configured()
+    if not use_reddit_oauth and datetime.now().strftime("%Y-%m-%d") >= "2026-10-15":
+        print(f"ℹ️ Reddit retires RSS on {REDDIT_RSS_RETIREMENT} — set REDDIT_CLIENT_ID / "
+              "REDDIT_CLIENT_SECRET / REDDIT_USERNAME / REDDIT_PASSWORD to keep Reddit in the digest")
 
     # Fetch from RSS feeds
     for name, url in RSS_FEEDS.items():
         if name == "Hacker News":
             continue  # We'll use the API instead
+        subreddit = _subreddit_from_feed_url(url)
+        if subreddit and use_reddit_oauth:
+            print(f"Fetching {name} (OAuth)...")
+            articles = fetch_reddit_oauth(name, subreddit, max_per_source)
+            if articles is None:
+                articles = fetch_rss_feed(name, url, max_per_source)
+            all_articles.extend(articles)
+            print(f"  Got {len(articles)} articles")
+            continue
         print(f"Fetching {name}...")
         articles = fetch_rss_feed(name, url, max_per_source)
         all_articles.extend(articles)
@@ -639,13 +789,18 @@ def fetch_reddit_thread_details(
     if not reddit_articles:
         # The Reddit RSS feeds returned nothing — with 6 subs this means the
         # feeds got blocked/broke (don't fail silently like the .json block did).
-        print("  ⚠️ No Reddit articles in any feed — sending alert email")
+        print("  ⚠️ No Reddit articles from any subreddit — sending alert email")
+        how = ("via OAuth (check the REDDIT_* credentials and the app's status at "
+               "reddit.com/prefs/apps)" if reddit_oauth_configured() else
+               f"via RSS (Reddit retired RSS on {REDDIT_RSS_RETIREMENT}; set "
+               "REDDIT_CLIENT_ID / REDDIT_CLIENT_SECRET / REDDIT_USERNAME / "
+               "REDDIT_PASSWORD for a registered script app to switch to OAuth)")
         try:
             send_error_email(
-                "Reddit RSS feeds returned no articles",
-                "The Reddit RSS feeds produced 0 articles this run (normally ~90 "
-                "across the 6 subs). Reddit likely blocked the .rss feeds too — "
-                "any downstream Reddit consumer will go dry. Check the feeds.",
+                "Reddit returned no articles",
+                f"All subreddit fetches produced 0 articles this run {how}. "
+                "The Reddit section of today's digest is empty and any downstream "
+                "Reddit consumer is not refreshing.",
             )
         except Exception as e:
             print(f"  ⚠️ Could not send Reddit alert email: {e}")
@@ -665,25 +820,31 @@ def fetch_reddit_thread_details(
     # emptied reddit_thread_details. Build details from the RSS feed content the
     # digest already fetched (title + post body + link) instead — no .json, no
     # OAuth. RSS carries no comments, so top_comments is left empty.
-    print(f"  Building details for {len(to_fetch)} Reddit threads from RSS...")
+    print(f"  Building details for {len(to_fetch)} Reddit threads...")
     fetched = 0
     for article in to_fetch:
         try:
-            selftext = BeautifulSoup(
-                article.summary or "", "html.parser",
-            ).get_text(" ", strip=True)
-            # Drop Reddit's RSS boilerplate ("submitted by /u/x [link] [comments]")
-            selftext = re.sub(r"\s*submitted by\s*/u/\S+.*$", "", selftext).strip()
-            m = re.search(r"reddit\.com/r/([^/]+)/", article.link)
-            subreddit = m.group(1) if m else ""
+            meta = _REDDIT_POST_META.get(article.link)
+            if meta:
+                # OAuth listing: real body, author, score, comment count.
+                selftext = meta["selftext"]
+                subreddit = meta["subreddit"]
+            else:
+                selftext = BeautifulSoup(
+                    article.summary or "", "html.parser",
+                ).get_text(" ", strip=True)
+                # Drop Reddit's RSS boilerplate ("submitted by /u/x [link] [comments]")
+                selftext = re.sub(r"\s*submitted by\s*/u/\S+.*$", "", selftext).strip()
+                m = re.search(r"reddit\.com/r/([^/]+)/", article.link)
+                subreddit = m.group(1) if m else ""
             existing[article.link] = {
                 "title": article.title,
                 "selftext": selftext[:2000],
-                "author": "",
-                "score": 0,
-                "num_comments": 0,
+                "author": meta["author"] if meta else "",
+                "score": meta["score"] if meta else 0,
+                "num_comments": meta["num_comments"] if meta else 0,
                 "subreddit": subreddit,
-                "created_utc": (
+                "created_utc": meta["created_utc"] if meta else (
                     article.published.timestamp() if article.published else 0
                 ),
                 "url": article.link,
@@ -695,7 +856,7 @@ def fetch_reddit_thread_details(
             print(f"    Error building {article.title[:50]}...: {e}")
             continue
 
-    print(f"  ✓ Built {fetched} Reddit thread details from RSS ({len(existing)} total cached)")
+    print(f"  ✓ Built {fetched} Reddit thread details ({len(existing)} total cached)")
 
     # Don't fail silently: we had threads to build (to_fetch non-empty) but built
     # none — that's what happened when Reddit killed the .json endpoint. Alert.

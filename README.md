@@ -131,6 +131,28 @@ cost well under $1/month.
 
 ---
 
+## Reddit after Nov 13, 2026
+
+Reddit retires RSS feeds on **2026-11-13** and unregistered API access in
+**March 2027**; registered apps must be approved by **2027-01-12**. The digest
+keeps its subreddits by reading each `/r/<sub>/new` listing through Reddit's
+OAuth API with a registered script app, and falls back to RSS per subreddit on
+any failure (so nothing changes until the credentials exist).
+
+1. On the Reddit account that will do the reading, create a **script** app at
+   https://www.reddit.com/prefs/apps (redirect URI can be `http://localhost`).
+2. Register the app under Reddit's developer program before 2027-01-12.
+3. Put `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USERNAME` and
+   `REDDIT_PASSWORD` in `.env` (with 2FA, the password is `password:otp`).
+   The next run logs "Fetching Reddit r/… (OAuth)".
+
+The OAuth listing also carries the post body, author, score and comment count,
+so the thread cache gets richer than the RSS version. If every subreddit returns
+nothing, the existing alert email fires and says which path failed. From Oct 15
+the run log reminds you daily until the credentials are set.
+
+---
+
 ## Daily Watch Feeds (Optional)
 
 A weekly sweep has a five-day latency ceiling. For names you care about
