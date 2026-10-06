@@ -675,21 +675,32 @@ def fetch_reddit_serper(name: str, subreddit: str, max_articles: int) -> Optiona
     key = os.getenv("SERPER_API_KEY", "").strip()
     if not key:
         return None
-    try:
-        resp = requests.post(
-            "https://google.serper.dev/search",
-            headers={"X-API-KEY": key, "Content-Type": "application/json"},
-            json={"q": f"site:reddit.com/r/{subreddit}", "tbs": "qdr:d",
-                  "num": 10, "gl": "us", "hl": "en"},
-            timeout=20,
-        )
+    # A Google query behind Serper occasionally stalls; one retry with a long
+    # timeout costs nothing (a timed-out request isn't billed as a result).
+    for attempt in (1, 2):
+        try:
+            resp = requests.post(
+                "https://google.serper.dev/search",
+                headers={"X-API-KEY": key, "Content-Type": "application/json"},
+                json={"q": f"site:reddit.com/r/{subreddit}", "tbs": "qdr:d",
+                      "num": 10, "gl": "us", "hl": "en"},
+                timeout=45,
+            )
+        except requests.exceptions.Timeout:
+            print(f"  ⚠️ {name} Serper timed out (attempt {attempt}/2)")
+            continue
+        except Exception as e:
+            print(f"  ⚠️ {name} Serper error: {e}")
+            return None
         if resp.status_code != 200:
             print(f"  ⚠️ {name} Serper HTTP {resp.status_code}: {resp.text[:120]}")
             return None
-        return _articles_from_serper(name, subreddit, resp.json(), max_articles)
-    except Exception as e:
-        print(f"  ⚠️ {name} Serper error: {e}")
-        return None
+        try:
+            return _articles_from_serper(name, subreddit, resp.json(), max_articles)
+        except ValueError:
+            print(f"  ⚠️ {name} Serper returned non-JSON")
+            return None
+    return None
 
 
 def _shadow_compare(subreddit: str, rss_articles: list[Article], serper_articles: Optional[list[Article]]) -> None:
