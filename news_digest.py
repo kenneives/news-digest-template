@@ -277,6 +277,14 @@ RSS_FEEDS = {
     "Reddit r/LocalLLaMA": "https://www.reddit.com/r/LocalLLaMA/new/.rss",
     "Reddit r/programming": "https://www.reddit.com/r/programming/new/.rss",
     "Reddit r/SideProject": "https://www.reddit.com/r/SideProject/new/.rss",
+
+    # Builder communities that publish feeds (Reddit's replacement floor —
+    # Reddit retires RSS on 2026-11-13; see "Reddit after Nov 13" in README)
+    "Hacker News Show HN": "https://hnrss.org/show?points=20",
+    "Hacker News Ask HN": "https://hnrss.org/ask?points=20",
+    "Lobsters": "https://lobste.rs/rss",
+    "Product Hunt": "https://www.producthunt.com/feed",
+    "Dev.to": "https://dev.to/feed",
 }
 
 # =============================================================================
@@ -586,135 +594,34 @@ def fetch_hacker_news_top(max_articles: int = 10) -> list[Article]:
 
 
 # =============================================================================
-# Reddit via OAuth (Reddit retires RSS on 2026-11-13; unregistered API access
-# ends March 2027). With a registered script app the digest reads each
-# subreddit's /new listing through oauth.reddit.com instead. Configure:
-#   REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET   from https://www.reddit.com/prefs/apps
-#   REDDIT_USERNAME, REDDIT_PASSWORD         the account that owns the app
-#   REDDIT_USER_AGENT (optional)             e.g. "NewsDigest/1.0 (by /u/you)"
-# Unset = the RSS feeds in RSS_FEEDS are used as before. If an OAuth fetch
-# fails, that subreddit falls back to RSS for the run.
+# Reddit via Google (Serper). Reddit retires RSS on 2026-11-13 and gates its
+# API behind an approval Reddit has refused this project, so after Nov 13 the
+# only outside copy of fresh Reddit threads is Google's index (Reddit's
+# robots.txt blocks every other crawler). Serper returns Google results as
+# JSON: one query per subreddit, past day, 10 results = 1 credit.
+#   SERPER_API_KEY    from https://serper.dev (2,500 free credits, no card)
+#   REDDIT_SOURCE     auto (default) | rss | serper
+#     auto: RSS feeds the email until REDDIT_RSS_RETIREMENT while Serper runs
+#           in SHADOW mode (results compared against RSS and stamped into
+#           history["reddit_serper_shadow"], which syncs to EC2); from the
+#           retirement date Serper feeds the email and RSS is only a fallback.
 # =============================================================================
 
 REDDIT_RSS_RETIREMENT = "2026-11-13"
-_REDDIT_TOKEN: dict = {}            # {"value": str, "expires": float}
-_REDDIT_POST_META: dict[str, dict] = {}   # link -> listing fields for the thread cache
+_REDDIT_POST_META: dict[str, dict] = {}   # link -> fields for the thread cache
+_REDDIT_SHADOW: dict = {}                 # per-run Serper-vs-RSS comparison
 
 
-def reddit_oauth_configured() -> bool:
-    return all(os.getenv(k, "").strip() for k in (
-        "REDDIT_CLIENT_ID", "REDDIT_CLIENT_SECRET", "REDDIT_USERNAME", "REDDIT_PASSWORD"))
+def serper_configured() -> bool:
+    return bool(os.getenv("SERPER_API_KEY", "").strip())
 
 
-def _reddit_user_agent() -> str:
-    return os.getenv("REDDIT_USER_AGENT", "").strip() or (
-        f"NewsDigest/1.0 (by /u/{os.getenv('REDDIT_USERNAME', 'unknown').strip()})")
-
-
-def _reddit_oauth_token(force: bool = False) -> Optional[str]:
-    """Password-grant token for a script app; cached for its lifetime.
-    Returns None (and prints why) on failure — never raises."""
-    if not force and _REDDIT_TOKEN.get("value") and time.time() < _REDDIT_TOKEN.get("expires", 0) - 60:
-        return _REDDIT_TOKEN["value"]
-    try:
-        resp = requests.post(
-            "https://www.reddit.com/api/v1/access_token",
-            auth=(os.getenv("REDDIT_CLIENT_ID").strip(), os.getenv("REDDIT_CLIENT_SECRET").strip()),
-            data={"grant_type": "password",
-                  "username": os.getenv("REDDIT_USERNAME").strip(),
-                  "password": os.getenv("REDDIT_PASSWORD").strip()},
-            headers={"User-Agent": _reddit_user_agent()},
-            timeout=15,
-        )
-        if resp.status_code != 200:
-            print(f"  ⚠️ Reddit OAuth token request failed: HTTP {resp.status_code} {resp.text[:120]}")
-            return None
-        body = resp.json()
-        token = body.get("access_token")
-        if not token:
-            print(f"  ⚠️ Reddit OAuth token response had no access_token: {body}")
-            return None
-        _REDDIT_TOKEN["value"] = token
-        _REDDIT_TOKEN["expires"] = time.time() + float(body.get("expires_in", 3600))
-        return token
-    except Exception as e:
-        print(f"  ⚠️ Reddit OAuth token error: {e}")
-        return None
-
-
-def _articles_from_reddit_listing(name: str, data: dict, cutoff: datetime,
-                                  max_articles: int) -> list[Article]:
-    """Turn a /r/<sub>/new listing into Articles (last 24h, newest first) and
-    record the fields the thread cache needs. Pure; safe to unit-test."""
-    articles: list[Article] = []
-    children = (data.get("data") or {}).get("children") or []
-    for child in children:
-        post = child.get("data") or {}
-        permalink = post.get("permalink") or ""
-        if not permalink or post.get("stickied"):
-            continue
-        created = post.get("created_utc")
-        published = (datetime.fromtimestamp(float(created), tz=timezone.utc)
-                     if created else None)
-        if published and published < cutoff:
-            continue
-        link = "https://www.reddit.com" + permalink
-        selftext = (post.get("selftext") or "").strip()
-        summary = selftext[:500] if selftext else (
-            f"Link post → {post.get('url', '')}" if post.get("url") else "")
-        articles.append(Article(
-            title=post.get("title", "No title"),
-            link=link,
-            summary=summary,
-            source=name,
-            published=published,
-        ))
-        _REDDIT_POST_META[link] = {
-            "selftext": selftext[:2000],
-            "author": post.get("author") or "",
-            "score": int(post.get("score") or 0),
-            "num_comments": int(post.get("num_comments") or 0),
-            "subreddit": post.get("subreddit") or "",
-            "created_utc": float(created or 0),
-        }
-        if len(articles) >= max_articles:
-            break
-    return articles
-
-
-def fetch_reddit_oauth(name: str, subreddit: str, max_articles: int) -> Optional[list[Article]]:
-    """Fetch /r/<subreddit>/new via OAuth. Returns None on any failure so the
-    caller can fall back to RSS for that subreddit."""
-    token = _reddit_oauth_token()
-    if not token:
-        return None
-    for attempt in (1, 2):
-        try:
-            resp = requests.get(
-                f"https://oauth.reddit.com/r/{subreddit}/new",
-                params={"limit": min(100, max(25, max_articles * 2)), "raw_json": 1},
-                headers={"Authorization": f"bearer {token}", "User-Agent": _reddit_user_agent()},
-                timeout=20,
-            )
-        except Exception as e:
-            print(f"  ⚠️ {name} OAuth fetch error: {e}")
-            return None
-        if resp.status_code == 401 and attempt == 1:
-            token = _reddit_oauth_token(force=True)
-            if not token:
-                return None
-            continue
-        if resp.status_code != 200:
-            print(f"  ⚠️ {name} OAuth HTTP {resp.status_code} — falling back to RSS")
-            return None
-        try:
-            data = resp.json()
-        except ValueError:
-            print(f"  ⚠️ {name} OAuth returned non-JSON — falling back to RSS")
-            return None
-        cutoff = datetime.now(timezone.utc) - timedelta(days=1)
-        return _articles_from_reddit_listing(name, data, cutoff, max_articles)
-    return None
+def reddit_source() -> str:
+    """Which path feeds the email today: 'rss' or 'serper'."""
+    mode = os.getenv("REDDIT_SOURCE", "auto").strip().lower()
+    if mode in ("rss", "serper"):
+        return mode
+    return "serper" if datetime.now().strftime("%Y-%m-%d") >= REDDIT_RSS_RETIREMENT else "rss"
 
 
 def _subreddit_from_feed_url(url: str) -> Optional[str]:
@@ -722,23 +629,152 @@ def _subreddit_from_feed_url(url: str) -> Optional[str]:
     return m.group(1) if m else None
 
 
+def _reddit_thread_id(link: str) -> str:
+    m = re.search(r"/comments/([a-z0-9]+)", link)
+    return m.group(1) if m else link.rstrip("/").lower()
+
+
+_REDDIT_TITLE_SUFFIX = re.compile(r"\s*(:\s*r/\w+|-\s*Reddit)\s*$", re.IGNORECASE)
+
+
+def _articles_from_serper(name: str, subreddit: str, data: dict, max_articles: int) -> list[Article]:
+    """Turn a Serper response for `site:reddit.com/r/<sub>` into Articles.
+    Only thread URLs in that subreddit count. Pure; safe to unit-test."""
+    articles: list[Article] = []
+    seen: set[str] = set()
+    for item in data.get("organic") or []:
+        link = (item.get("link") or "").split("?")[0]
+        if f"/r/{subreddit.lower()}/comments/" not in link.lower():
+            continue
+        tid = _reddit_thread_id(link)
+        if tid in seen:
+            continue
+        seen.add(tid)
+        title = _REDDIT_TITLE_SUFFIX.sub("", item.get("title") or "No title").strip()
+        snippet = (item.get("snippet") or "").strip()
+        when = (item.get("date") or "").strip()
+        articles.append(Article(
+            title=title,
+            link=link,
+            summary=(f"[{when}] " if when else "") + snippet,
+            source=name,
+            published=None,   # Google's past-day filter already scoped it
+        ))
+        _REDDIT_POST_META[link] = {
+            "selftext": snippet[:2000], "author": "", "score": 0, "num_comments": 0,
+            "subreddit": subreddit, "created_utc": 0,
+        }
+        if len(articles) >= max_articles:
+            break
+    return articles
+
+
+def fetch_reddit_serper(name: str, subreddit: str, max_articles: int) -> Optional[list[Article]]:
+    """Google results for the subreddit's threads from the past day, via Serper.
+    Returns None on any failure so the caller can fall back to RSS."""
+    key = os.getenv("SERPER_API_KEY", "").strip()
+    if not key:
+        return None
+    try:
+        resp = requests.post(
+            "https://google.serper.dev/search",
+            headers={"X-API-KEY": key, "Content-Type": "application/json"},
+            json={"q": f"site:reddit.com/r/{subreddit}", "tbs": "qdr:d",
+                  "num": 10, "gl": "us", "hl": "en"},
+            timeout=20,
+        )
+        if resp.status_code != 200:
+            print(f"  ⚠️ {name} Serper HTTP {resp.status_code}: {resp.text[:120]}")
+            return None
+        return _articles_from_serper(name, subreddit, resp.json(), max_articles)
+    except Exception as e:
+        print(f"  ⚠️ {name} Serper error: {e}")
+        return None
+
+
+def _shadow_compare(subreddit: str, rss_articles: list[Article], serper_articles: Optional[list[Article]]) -> None:
+    """Record how Serper's view of a subreddit compares with RSS (the ground
+    truth while it still exists). Read it from history['reddit_serper_shadow']."""
+    rss_ids = {_reddit_thread_id(a.link) for a in rss_articles}
+    if serper_articles is None:
+        entry = {"rss": len(rss_ids), "serper": None, "overlap": None, "serper_only": []}
+    else:
+        serper_ids = {_reddit_thread_id(a.link): a.title for a in serper_articles}
+        overlap = len(rss_ids & set(serper_ids))
+        entry = {"rss": len(rss_ids), "serper": len(serper_ids), "overlap": overlap,
+                 "serper_only": [t[:80] for i, t in serper_ids.items() if i not in rss_ids][:5]}
+    _REDDIT_SHADOW.setdefault("subreddits", {})[subreddit] = entry
+    _REDDIT_SHADOW["date"] = datetime.now().strftime("%Y-%m-%d")
+    print(f"  🔍 shadow r/{subreddit}: rss={entry['rss']} serper={entry['serper']} overlap={entry['overlap']}")
+
+
+# =============================================================================
+# Hugging Face (daily papers + trending models) — covers what r/MachineLearning
+# and r/LocalLLaMA used to: public JSON API, no key, no approval.
+# =============================================================================
+
+def fetch_huggingface(max_papers: int = 12, max_models: int = 8) -> list[Article]:
+    articles: list[Article] = []
+    headers = {"User-Agent": "NewsDigest/1.0 (daily digest bot)", "Accept": "application/json"}
+    # No date cutoff: the endpoint is the current curated batch (it lags on
+    # weekends), and the 7-day sent-article history already prevents repeats.
+    try:
+        resp = requests.get("https://huggingface.co/api/daily_papers",
+                            params={"limit": max_papers}, headers=headers, timeout=20)
+        for item in resp.json() if resp.status_code == 200 else []:
+            paper = item.get("paper") or {}
+            pid = paper.get("id") or ""
+            when = item.get("publishedAt") or paper.get("publishedAt") or ""
+            published = _parse_datetime(when) if when else None
+            summary = (paper.get("summary") or item.get("summary") or "").strip()
+            upvotes = paper.get("upvotes")
+            if upvotes:
+                summary = f"[{upvotes} upvotes] {summary}"
+            articles.append(Article(
+                title=(item.get("title") or paper.get("title") or "Untitled paper").strip(),
+                link=f"https://huggingface.co/papers/{pid}" if pid else "https://huggingface.co/papers",
+                summary=summary[:500], source="Hugging Face Papers", published=published,
+            ))
+    except Exception as e:
+        print(f"  ⚠️ Hugging Face papers failed: {e}")
+    try:
+        resp = requests.get("https://huggingface.co/api/models",
+                            params={"sort": "trendingScore", "direction": -1, "limit": max_models},
+                            headers=headers, timeout=20)
+        for m in resp.json() if resp.status_code == 200 else []:
+            mid = m.get("id") or m.get("modelId") or ""
+            if not mid:
+                continue
+            bits = [b for b in [m.get("pipeline_tag"),
+                                f"{m.get('likes', 0):,} likes", f"{m.get('downloads', 0):,} downloads"] if b]
+            articles.append(Article(
+                title=f"Trending on Hugging Face: {mid}",
+                link=f"https://huggingface.co/{mid}",
+                summary="Trending model — " + ", ".join(bits), source="Hugging Face Trending", published=None,
+            ))
+    except Exception as e:
+        print(f"  ⚠️ Hugging Face trending failed: {e}")
+    return articles
+
+
 def fetch_all_news() -> list[Article]:
     """Fetch news from all configured sources."""
     all_articles = []
     max_per_source = int(os.getenv('MAX_ARTICLES_PER_SOURCE', 20))
-    use_reddit_oauth = reddit_oauth_configured()
-    if not use_reddit_oauth and datetime.now().strftime("%Y-%m-%d") >= "2026-10-15":
-        print(f"ℹ️ Reddit retires RSS on {REDDIT_RSS_RETIREMENT} — set REDDIT_CLIENT_ID / "
-              "REDDIT_CLIENT_SECRET / REDDIT_USERNAME / REDDIT_PASSWORD to keep Reddit in the digest")
+    source = reddit_source()
+    shadow = serper_configured() and source == "rss"
+    if source == "serper" and not serper_configured():
+        print(f"⚠️ Reddit RSS retired {REDDIT_RSS_RETIREMENT} and SERPER_API_KEY is unset — "
+              "the Reddit section will be empty (see README: Reddit after Nov 13)")
 
     # Fetch from RSS feeds
     for name, url in RSS_FEEDS.items():
         if name == "Hacker News":
             continue  # We'll use the API instead
         subreddit = _subreddit_from_feed_url(url)
-        if subreddit and use_reddit_oauth:
-            print(f"Fetching {name} (OAuth)...")
-            articles = fetch_reddit_oauth(name, subreddit, max_per_source)
+        if subreddit and source == "serper":
+            print(f"Fetching {name} (Google via Serper)...")
+            articles = fetch_reddit_serper(name, subreddit, max_per_source)
             if articles is None:
                 articles = fetch_rss_feed(name, url, max_per_source)
             all_articles.extend(articles)
@@ -748,6 +784,14 @@ def fetch_all_news() -> list[Article]:
         articles = fetch_rss_feed(name, url, max_per_source)
         all_articles.extend(articles)
         print(f"  Got {len(articles)} articles")
+        if subreddit and shadow:
+            _shadow_compare(subreddit, articles, fetch_reddit_serper(name, subreddit, max_per_source))
+
+    # Hugging Face (JSON API, no feed)
+    print("Fetching Hugging Face papers + trending...")
+    hf = fetch_huggingface()
+    all_articles.extend(hf)
+    print(f"  Got {len(hf)} articles")
 
     # Daily watch feeds (Google News queries for tracked names)
     for name, url in watch_feeds():
@@ -785,16 +829,17 @@ def fetch_reddit_thread_details(
     Returns:
         Updated history dict with reddit_thread_details populated.
     """
+    if _REDDIT_SHADOW:
+        history["reddit_serper_shadow"] = dict(_REDDIT_SHADOW)
     reddit_articles = [a for a in articles if "reddit.com" in a.link]
     if not reddit_articles:
         # The Reddit RSS feeds returned nothing — with 6 subs this means the
         # feeds got blocked/broke (don't fail silently like the .json block did).
         print("  ⚠️ No Reddit articles from any subreddit — sending alert email")
-        how = ("via OAuth (check the REDDIT_* credentials and the app's status at "
-               "reddit.com/prefs/apps)" if reddit_oauth_configured() else
+        how = (f"via Google/Serper (check SERPER_API_KEY and credits at serper.dev)"
+               if reddit_source() == "serper" and serper_configured() else
                f"via RSS (Reddit retired RSS on {REDDIT_RSS_RETIREMENT}; set "
-               "REDDIT_CLIENT_ID / REDDIT_CLIENT_SECRET / REDDIT_USERNAME / "
-               "REDDIT_PASSWORD for a registered script app to switch to OAuth)")
+               "SERPER_API_KEY to read the subreddits through Google — see README)")
         try:
             send_error_email(
                 "Reddit returned no articles",
@@ -819,14 +864,14 @@ def fetch_reddit_thread_details(
     # Reddit blocks the unauthenticated .json endpoint (403), which silently
     # emptied reddit_thread_details. Build details from the RSS feed content the
     # digest already fetched (title + post body + link) instead — no .json, no
-    # OAuth. RSS carries no comments, so top_comments is left empty.
+    # Serper snippet. Neither carries comments, so top_comments is left empty.
     print(f"  Building details for {len(to_fetch)} Reddit threads...")
     fetched = 0
     for article in to_fetch:
         try:
             meta = _REDDIT_POST_META.get(article.link)
             if meta:
-                # OAuth listing: real body, author, score, comment count.
+                # Serper result: Google's snippet stands in for the body.
                 selftext = meta["selftext"]
                 subreddit = meta["subreddit"]
             else:

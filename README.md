@@ -133,23 +133,26 @@ cost well under $1/month.
 
 ## Reddit after Nov 13, 2026
 
-Reddit retires RSS feeds on **2026-11-13** and unregistered API access in
-**March 2027**; registered apps must be approved by **2027-01-12**. The digest
-keeps its subreddits by reading each `/r/<sub>/new` listing through Reddit's
-OAuth API with a registered script app, and falls back to RSS per subreddit on
-any failure (so nothing changes until the credentials exist).
+Reddit retires RSS feeds on **2026-11-13** and gates its API behind an approval
+process. Two things keep the "what builders are talking about" signal:
 
-1. On the Reddit account that will do the reading, create a **script** app at
-   https://www.reddit.com/prefs/apps (redirect URI can be `http://localhost`).
-2. Register the app under Reddit's developer program before 2027-01-12.
-3. Put `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USERNAME` and
-   `REDDIT_PASSWORD` in `.env` (with 2FA, the password is `password:otp`).
-   The next run logs "Fetching Reddit r/… (OAuth)".
+1. **A floor that cannot be taken away.** Builder communities that publish
+   feeds: Show HN and Ask HN, Lobsters, Product Hunt, Dev.to, plus Hugging Face
+   daily papers and trending models via its public JSON API (`fetch_huggingface`).
+2. **Reddit through Google.** Since July 2024 Reddit's robots.txt blocks every
+   crawler except Google, so Google's index is the only outside copy of fresh
+   threads. `fetch_reddit_serper` asks Google (via [Serper](https://serper.dev),
+   2,500 free credits, then about $1 per 1,000 queries) for each subreddit's
+   threads from the past day. With `REDDIT_SOURCE=auto` the RSS feeds keep
+   feeding the email until Nov 13 while Serper runs in **shadow mode**: each run
+   compares Serper's threads with RSS per subreddit and stamps the result into
+   `digest_history.json` under `reddit_serper_shadow` (recall = overlap / rss).
+   From Nov 13 Serper feeds the email and RSS is only a fallback.
 
-The OAuth listing also carries the post body, author, score and comment count,
-so the thread cache gets richer than the RSS version. If every subreddit returns
-nothing, the existing alert email fires and says which path failed. From Oct 15
-the run log reminds you daily until the credentials are set.
+If Reddit approves you for an API app, that is a better source than Google's
+index; this project does not include that path because approval is not a given.
+A Google Alert with RSS delivery per subreddit is a free experiment worth
+running alongside Serper; if it works it plugs into `RSS_FEEDS` as-is.
 
 ---
 
