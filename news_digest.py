@@ -192,6 +192,16 @@ INTERESTS = """
 - Promotional content disguised as news
 """
 
+# Google News RSS: a query (incl. site:domain) as a feed. Used for publishers
+# whose own feeds died or block bots — Google still indexes them.
+WATCH_QUERY_WINDOW = "when:2d"  # Google News recency operator; the 24h filter in fetch_rss_feed does the rest
+
+
+def google_news_rss_url(query: str) -> str:
+    return "https://news.google.com/rss/search?" + urllib.parse.urlencode(
+        {"q": f"{query} {WATCH_QUERY_WINDOW}", "hl": "en-US", "gl": "US", "ceid": "US:en"})
+
+
 # RSS Feeds organized by category
 RSS_FEEDS = {
     # Tech & AI (Priority)
@@ -201,16 +211,16 @@ RSS_FEEDS = {
     "Ars Technica": "https://feeds.arstechnica.com/arstechnica/index",
     "The Verge": "https://www.theverge.com/rss/index.xml",
     "MIT Tech Review": "https://www.technologyreview.com/feed/",
-    "VentureBeat AI": "https://venturebeat.com/category/ai/feed/",
+    "VentureBeat (via Google News)": google_news_rss_url("site:venturebeat.com"),
     "The Information": "https://www.theinformation.com/feed",
 
     # Robotics & Automation
-    "IEEE Spectrum Robotics": "https://spectrum.ieee.org/feeds/topic/robotics",
+    "IEEE Spectrum Robotics": "https://spectrum.ieee.org/feeds/topic/robotics.rss",
     "The Robot Report": "https://www.therobotreport.com/feed/",
 
     # Automotive & EVs
     "Electrek": "https://electrek.co/feed/",
-    "InsideEVs": "https://insideevs.com/rss/news/",
+    "InsideEVs": "https://insideevs.com/rss/articles/all/",
     "The Drive": "https://www.thedrive.com/feed",
 
     # Social Platforms & Policy
@@ -227,19 +237,19 @@ RSS_FEEDS = {
 
     # Climate Tech
     "Canary Media": "https://www.canarymedia.com/feed",
-    "CleanTechnica": "https://cleantechnica.com/feed/",
+    "CleanTechnica (via Google News)": google_news_rss_url("site:cleantechnica.com"),
 
     # Major News Outlets
     "BBC News": "https://feeds.bbci.co.uk/news/rss.xml",
-    "Reuters": "https://www.reutersagency.com/feed/",
+    "Reuters (via Google News)": google_news_rss_url("site:reuters.com"),
     "NPR News": "https://feeds.npr.org/1001/rss.xml",
-    "AP News": "https://rsshub.app/apnews/topics/apf-topnews",
+    "AP News (via Google News)": google_news_rss_url("site:apnews.com"),
     "Al Jazeera": "https://www.aljazeera.com/xml/rss/all.xml",
 
     # US News
-    "Politico": "https://www.politico.com/rss/politicopicks.xml",
+    "Politico": "https://rss.politico.com/politics-news.xml",
     "The Hill": "https://thehill.com/feed/",
-    "USA Today": "https://www.usatoday.com/news/nation/",
+    "USA Today (via Google News)": google_news_rss_url("site:usatoday.com"),
 
     # Local News — add your local news RSS feeds here
 
@@ -255,7 +265,7 @@ RSS_FEEDS = {
     "Crunchbase News": "https://news.crunchbase.com/feed/",
 
     # Legal & Regulatory
-    "Reuters Legal": "https://www.reuters.com/legal/rss",
+    "Reuters Legal (via Google News)": google_news_rss_url("site:reuters.com/legal"),
     "The Register": "https://www.theregister.com/headlines.atom",
     "Rest of World": "https://restofworld.org/feed/",
 
@@ -264,7 +274,7 @@ RSS_FEEDS = {
     "Phys.org": "https://phys.org/rss-feed/",
     "Nature News": "https://www.nature.com/nature.rss",
     "NASA": "https://www.nasa.gov/rss/dyn/breaking_news.rss",
-    "Space.com": "https://www.space.com/feeds/all",
+    "Space.com (via Google News)": google_news_rss_url("site:space.com"),
 
     # Entertainment (filtered for quality)
     "The Hollywood Reporter": "https://www.hollywoodreporter.com/feed/",
@@ -299,14 +309,6 @@ RSS_FEEDS = {
 WATCH_QUERIES: list[tuple[str, str]] = [
     # ("Watch (Acme, Example Co)", '("Acme AI" OR "Example Co") (product OR funding OR launch)'),
 ]
-WATCH_QUERY_WINDOW = "when:2d"  # Google News recency operator; the 24h filter in fetch_rss_feed does the rest
-
-
-def google_news_rss_url(query: str) -> str:
-    return "https://news.google.com/rss/search?" + urllib.parse.urlencode(
-        {"q": f"{query} {WATCH_QUERY_WINDOW}", "hl": "en-US", "gl": "US", "ceid": "US:en"})
-
-
 def watch_feeds() -> list[tuple[str, str]]:
     """(source name, RSS URL) for every watch query."""
     return [(name, google_news_rss_url(q)) for name, q in WATCH_QUERIES]
@@ -793,10 +795,22 @@ def fetch_all_news() -> list[Article]:
             continue
         print(f"Fetching {name}...")
         articles = fetch_rss_feed(name, url, max_per_source)
+        if subreddit:
+            # Reddit rate-limits unauthenticated RSS: back-to-back subreddit
+            # fetches get one 200 then 429s. Pace them, and when RSS still
+            # comes back empty use Google's view of the subreddit instead of
+            # silently dropping it (RSS is retired on REDDIT_RSS_RETIREMENT anyway).
+            if not articles and serper_configured():
+                via_google = fetch_reddit_serper(name, subreddit, max_per_source)
+                _shadow_compare(subreddit, [], via_google)
+                if via_google:
+                    articles = via_google
+                    print("  RSS empty → using Google via Serper")
+            elif shadow:
+                _shadow_compare(subreddit, articles, fetch_reddit_serper(name, subreddit, max_per_source))
+            time.sleep(float(os.getenv("REDDIT_RSS_DELAY", "3")))
         all_articles.extend(articles)
         print(f"  Got {len(articles)} articles")
-        if subreddit and shadow:
-            _shadow_compare(subreddit, articles, fetch_reddit_serper(name, subreddit, max_per_source))
 
     # Hugging Face (JSON API, no feed)
     print("Fetching Hugging Face papers + trending...")

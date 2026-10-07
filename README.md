@@ -348,7 +348,12 @@ Edit the `INTERESTS` variable in `news_digest.py` to change what topics Claude p
 
 ### Add/remove news sources
 
-Edit the `RSS_FEEDS` dictionary in `news_digest.py`.
+Edit the `RSS_FEEDS` dictionary in `news_digest.py`. A publisher whose feed is
+dead or blocks bots can be read through Google's index instead:
+`google_news_rss_url("site:example.com")` as the feed URL. Reddit RSS is
+rate-limited to roughly one subreddit per run; any subreddit whose RSS comes
+back empty is read via Serper when `SERPER_API_KEY` is set (`REDDIT_RSS_DELAY`
+paces the requests, default 3s).
 
 ### Change article limits
 
