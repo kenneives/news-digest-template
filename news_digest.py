@@ -288,6 +288,19 @@ RSS_FEEDS = {
     "Reddit r/programming": "https://www.reddit.com/r/programming/new/.rss",
     "Reddit r/SideProject": "https://www.reddit.com/r/SideProject/new/.rss",
 
+    # The newsstand (Apple News stand-in): what everyone is reading, across every
+    # topic. Feeds the "Three Things to Know Today" and "Popular Across the
+    # Board" sections. Capped per feed in FEED_CAPS so breadth doesn't swamp depth.
+    "Google News Top Stories": "https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en",
+    "Google News · World": "https://news.google.com/rss/headlines/section/topic/WORLD?hl=en-US&gl=US&ceid=US:en",
+    "Google News · U.S.": "https://news.google.com/rss/headlines/section/topic/NATION?hl=en-US&gl=US&ceid=US:en",
+    "Google News · Business": "https://news.google.com/rss/headlines/section/topic/BUSINESS?hl=en-US&gl=US&ceid=US:en",
+    "Google News · Technology": "https://news.google.com/rss/headlines/section/topic/TECHNOLOGY?hl=en-US&gl=US&ceid=US:en",
+    "Google News · Entertainment": "https://news.google.com/rss/headlines/section/topic/ENTERTAINMENT?hl=en-US&gl=US&ceid=US:en",
+    "Google News · Sports": "https://news.google.com/rss/headlines/section/topic/SPORTS?hl=en-US&gl=US&ceid=US:en",
+    "Google News · Science": "https://news.google.com/rss/headlines/section/topic/SCIENCE?hl=en-US&gl=US&ceid=US:en",
+    "Google News · Health": "https://news.google.com/rss/headlines/section/topic/HEALTH?hl=en-US&gl=US&ceid=US:en",
+
     # Builder communities that publish feeds (Reddit's replacement floor —
     # Reddit retires RSS on 2026-11-13; see "Reddit after Nov 13" in README)
     "Hacker News Show HN": "https://hnrss.org/show?points=20",
@@ -300,6 +313,13 @@ RSS_FEEDS = {
 # =============================================================================
 # Duplicate Detection
 # =============================================================================
+
+# Per-feed article caps (default = MAX_ARTICLES_PER_SOURCE). The newsstand
+# feeds are breadth, not depth — a few from each section is the point.
+FEED_CAPS = {
+    "Google News Top Stories": 15,
+    **{name: 8 for name in RSS_FEEDS if name.startswith("Google News · ")},
+}
 
 # Daily watch feeds: Google News RSS queries for the names you track
 # (competitors, partners, your own company). Free, keyless, and same-day —
@@ -543,9 +563,12 @@ def fetch_rss_feed(name: str, url: str, max_articles: int = 5) -> list[Article]:
                 # useless to the model. Name the outlet instead.
                 src = entry.get('source')
                 outlet = src.get('title', '') if isinstance(src, dict) else ''
-                summary = (f"Watch-feed hit via Google News"
-                           f"{' (outlet: ' + outlet + ')' if outlet else ''}. "
-                           "Judge on the merits — a name match is not news by itself.")
+                via = f" (outlet: {outlet})" if outlet else ""
+                if name.startswith("Google News"):
+                    summary = f"{name} pick{via} — a widely covered story right now."
+                else:
+                    summary = (f"Watch-feed hit via Google News{via}. "
+                               "Judge on the merits — a name match is not news by itself.")
 
             articles.append(Article(
                 title=entry.get('title', 'No title'),
@@ -785,6 +808,7 @@ def fetch_all_news() -> list[Article]:
         if name == "Hacker News":
             continue  # We'll use the API instead
         subreddit = _subreddit_from_feed_url(url)
+        cap = FEED_CAPS.get(name, max_per_source)
         if subreddit and source == "serper":
             print(f"Fetching {name} (Google via Serper)...")
             articles = fetch_reddit_serper(name, subreddit, max_per_source)
@@ -794,7 +818,7 @@ def fetch_all_news() -> list[Article]:
             print(f"  Got {len(articles)} articles")
             continue
         print(f"Fetching {name}...")
-        articles = fetch_rss_feed(name, url, max_per_source)
+        articles = fetch_rss_feed(name, url, cap)
         if subreddit:
             # Reddit rate-limits unauthenticated RSS: back-to-back subreddit
             # fetches get one 200 then 429s. Pace them, and when RSS still
@@ -1259,6 +1283,14 @@ Create a well-organized, engaging daily digest email with these sections IN THIS
 
 ---
 
+### 🌍 THREE THINGS TO KNOW TODAY (Always include — exactly 3 items — the very FIRST section)
+The three most consequential developments in the world and in national government/politics from the last 24
+hours: what a well-informed person must know today regardless of personal interests. Draw on "Google News Top
+Stories", "Google News · World", "Google News · U.S." and the major outlets. Favor what a government, court,
+central bank, or military actually DID — an order, a ruling, a strike, a shutdown, a rate move, a law — over what
+someone said or predicted. One item per story: what happened, why it matters in one line, the link. No padding:
+if only two things truly qualify, include two.
+
 ### 🔥 TOP PRIORITY (Always include - most important section)
 The 4-6 most significant stories from these priority areas ONLY:
 - AI/ML breakthroughs, tools, and business news
@@ -1434,6 +1466,13 @@ Format as punchy one-liners with source links.
 
 ---
 
+### 📰 POPULAR ACROSS THE BOARD (Always include — 6-8 items)
+What everyone is reading today across EVERY topic, including ones outside the reader's interests: sports,
+entertainment, lifestyle, crime, weather, viral stories. Pick from the "Google News" sources (Top Stories and
+the section feeds) plus anything clearly going viral elsewhere. Breadth over depth: no two items on the same
+story, at most one item per topic, nothing already covered above. One line each with the link. This is the front
+page of the newsstand so the reader is never blindsided in conversation — the world's priorities, not theirs.
+
 ### ⚡ QUICK HITS (Optional, 3-5 items max)
 One-liner mentions of interesting but non-essential articles
 
@@ -1460,6 +1499,14 @@ You MUST return ONLY valid HTML (no markdown). Use this exact structure:
 ```html
 <h1>🗞️ Daily News Digest</h1>
 <p>Good morning! Here's your personalized news for [DATE].</p>
+
+<h2>🌍 Three Things to Know Today</h2>
+<ul>
+  <li>
+    <strong><a href="URL">What happened</a></strong> (Source)<br>
+    Why it matters, in one line.
+  </li>
+</ul>
 
 <h2>🔥 Top Priority</h2>
 <ul>
@@ -1688,6 +1735,105 @@ def extract_top_topics(html_content: str) -> list[str]:
                 break
 
     return topics[:5]
+
+
+# =============================================================================
+# Daily archive — a machine-readable copy of each day's digest for downstream
+# agents (e.g. an external advisor reading it through the trading bot's
+# gateway). One JSON per day under ARCHIVE_DIR (default ./archive), plus
+# latest.json and index.json. Retention ARCHIVE_RETENTION_DAYS (default 90).
+# =============================================================================
+
+ARCHIVE_SCHEMA = 1
+
+
+def _archive_dir() -> Path:
+    return Path(os.getenv("ARCHIVE_DIR", "").strip() or (Path(__file__).parent / "archive"))
+
+
+def _sections_from_html(html_content: str) -> list[dict]:
+    """Split the digest HTML on <h2> headers into [{title, text, html}].
+    `text` keeps links as 'Title (URL)' so a reader without HTML loses nothing."""
+    soup = BeautifulSoup(html_content or "", "html.parser")
+    sections: list[dict] = []
+    for h2 in soup.find_all("h2"):
+        chunk = []
+        node = h2.next_sibling
+        while node is not None and getattr(node, "name", None) != "h2":
+            chunk.append(str(node))
+            node = node.next_sibling
+        frag = BeautifulSoup("".join(chunk), "html.parser")
+        for a in frag.find_all("a", href=True):
+            a.replace_with(f"{a.get_text(' ', strip=True)} ({a['href']})")
+        for li in frag.find_all("li"):
+            li.insert_before("\n- ")
+        text = re.sub(r"[ \t]+", " ", frag.get_text(" ", strip=False))
+        text = re.sub(r"\n\s*\n+", "\n", text).strip()
+        sections.append({"title": h2.get_text(" ", strip=True), "text": text, "html": "".join(chunk).strip()})
+    return sections
+
+
+def write_archive(digest_html: str, articles: list, history: dict, email_sent: Optional[bool] = None,
+                  podcast_url: Optional[str] = None) -> Optional[Path]:
+    """Write today's archive JSON (+ latest.json, index.json), prune old days.
+    Best-effort: never raises."""
+    try:
+        adir = _archive_dir()
+        adir.mkdir(parents=True, exist_ok=True)
+        today = datetime.now().strftime("%Y-%m-%d")
+        sweep_meta = history.get("web_sweep_meta") or {}
+        last_sweep = sweep_meta.get("last_run_date", "")
+        radar_today = [e for e in history.get("agentgraph_radar", []) if e.get("date") == today]
+        doc = {
+            "schema": ARCHIVE_SCHEMA,
+            "date": today,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "note": ("Daily personal news digest. Sections are the email as sent (text keeps links as "
+                     "'Title (URL)'); articles are everything fetched in the last 24h that fed the model; "
+                     "sweep is the weekly web-grounded intelligence batch (its date tells you if it ran today); "
+                     "radar is today's competitor/partner tags. Anything here may be ignored."),
+            "email_sent": email_sent,
+            "podcast_url": podcast_url,
+            "sections": _sections_from_html(digest_html),
+            "article_count": len(articles),
+            "articles": [{
+                "title": a.title, "link": a.link, "source": a.source,
+                "summary": re.sub(r"<[^>]+>", "", a.summary or "")[:300],
+                "published": a.published.isoformat() if getattr(a, "published", None) else None,
+            } for a in articles],
+            "sweep": {
+                "last_run_date": last_sweep,
+                "ran_today": last_sweep == today,
+                "signals": [s for s in history.get("web_sweep", []) if s.get("date") == last_sweep],
+            },
+            "radar": radar_today,
+            "reddit_serper_shadow": history.get("reddit_serper_shadow"),
+        }
+        day_path = adir / f"digest-{today}.json"
+        payload = json.dumps(doc, ensure_ascii=False, indent=1)
+        day_path.write_text(payload, encoding="utf-8")
+        (adir / "latest.json").write_text(payload, encoding="utf-8")
+        keep_days = int(os.getenv("ARCHIVE_RETENTION_DAYS", "90"))
+        cutoff = (datetime.now() - timedelta(days=keep_days)).strftime("%Y-%m-%d")
+        dates = []
+        for f in sorted(adir.glob("digest-*.json")):
+            d = f.stem.replace("digest-", "")
+            if d < cutoff:
+                try:
+                    f.unlink()
+                except OSError:
+                    pass
+            else:
+                dates.append(d)
+        (adir / "index.json").write_text(json.dumps({
+            "schema": ARCHIVE_SCHEMA, "latest": dates[-1] if dates else None, "dates": dates,
+            "retention_days": keep_days,
+        }, indent=1), encoding="utf-8")
+        print(f"🗄️ Archive written: {day_path.name} ({len(doc['sections'])} sections, {len(articles)} articles)")
+        return day_path
+    except Exception as e:
+        print(f"⚠️ Archive write failed (digest unaffected): {e}")
+        return None
 
 
 # =============================================================================
@@ -2061,6 +2207,10 @@ def main():
             except Exception as e:
                 print(f"⚠️ Web sweep failed (digest unaffected): {e}")
 
+        # Step 2c: machine-readable archive of today's digest (before the
+        # podcast/email so it exists even if those fail; refreshed after send).
+        write_archive(digest_html, articles, history)
+
         # Step 3: Podcast Audio Pipeline
         podcast_url = None
         top_topics = []
@@ -2109,6 +2259,7 @@ def main():
         success = send_email(digest_html, podcast_url=podcast_url, top_topics=top_topics)
 
         if success:
+            write_archive(digest_html, articles, history, email_sent=True, podcast_url=podcast_url)
             # Mark articles as sent so they won't be included tomorrow
             print("💾 Saving article history...")
             history = mark_articles_as_sent(articles, history)

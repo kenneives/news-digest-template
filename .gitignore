@@ -20,3 +20,6 @@ Thumbs.db
 
 # Claude Code
 .claude/
+
+# Daily machine-readable digest archive (see README: Daily archive)
+archive/
