@@ -1289,7 +1289,9 @@ hours: what a well-informed person must know today regardless of personal intere
 Stories", "Google News · World", "Google News · U.S." and the major outlets. Favor what a government, court,
 central bank, or military actually DID — an order, a ruling, a strike, a shutdown, a rate move, a law — over what
 someone said or predicted. One item per story: what happened, why it matters in one line, the link. No padding:
-if only two things truly qualify, include two.
+if only two things truly qualify, include two. A fourth item is allowed ONLY on a genuinely extraordinary
+day — when leaving it out would be an obvious omission to anyone who read the news that day, such as a
+second event of the same scale as the first. Never five. The default is three.
 
 ### 🔥 TOP PRIORITY (Always include - most important section)
 The 4-6 most significant stories from these priority areas ONLY:
