@@ -156,6 +156,18 @@ running alongside Serper; if it works it plugs into `RSS_FEEDS` as-is.
 
 ---
 
+## Pictures on the top sections
+
+Items in "Three Things to Know Today" and "Top Priority" get a thumbnail: the
+image the feed provided, else the same headline's picture from another feed,
+else the page's social-preview image (`og:image`). Remote links, 560px wide,
+capped at 8 per email. `DIGEST_IMAGES=false` turns it off; `DIGEST_MAX_IMAGES`
+and `DIGEST_IMAGE_SECTIONS` (comma-separated header substrings) tune it. Google
+News links carry no image and can't be resolved, so the prompt prefers a
+publisher's own link when the same story is in a direct feed.
+
+---
+
 ## Daily Watch Feeds (Optional)
 
 A weekly sweep has a five-day latency ceiling. For names you care about

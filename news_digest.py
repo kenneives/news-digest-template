@@ -7,6 +7,7 @@ and sends a personalized email digest.
 """
 
 import hashlib
+import html
 import json
 import os
 import random
@@ -59,6 +60,7 @@ class Article:
     summary: str
     source: str
     published: Optional[datetime] = None
+    image: Optional[str] = None   # feed-provided thumbnail, if any (see _entry_image)
 
 
 # Your interests - Claude will prioritize and contextualize based on these
@@ -519,6 +521,39 @@ def mark_articles_as_sent(articles: list[Article], history: dict) -> dict:
 # News Fetching
 # =============================================================================
 
+_IMG_EXT_RE = re.compile(r"\.(jpe?g|png|webp|gif|avif)(\?|$)", re.IGNORECASE)
+
+
+def _entry_image(entry) -> Optional[str]:
+    """Best image URL a feed entry carries: media:content / media:thumbnail /
+    enclosure / first <img> in the body. None if the feed offers nothing."""
+    def ok(u) -> bool:
+        return isinstance(u, str) and u.startswith(("http://", "https://")) and "1x1" not in u and "pixel" not in u.lower()
+    for key in ("media_content", "media_thumbnail"):
+        for m in entry.get(key) or []:
+            u = (m or {}).get("url", "")
+            t = (m or {}).get("type", "") or (m or {}).get("medium", "")
+            if ok(u) and ("image" in t or not t or _IMG_EXT_RE.search(u)):
+                return u
+    for enc in entry.get("enclosures") or []:
+        u = (enc or {}).get("href") or (enc or {}).get("url", "")
+        if ok(u) and ("image" in ((enc or {}).get("type") or "") or _IMG_EXT_RE.search(u)):
+            return u
+    for lnk in entry.get("links") or []:
+        if (lnk or {}).get("rel") == "enclosure" and "image" in ((lnk or {}).get("type") or ""):
+            u = lnk.get("href", "")
+            if ok(u):
+                return u
+    body = ""
+    for c in entry.get("content") or []:
+        body += (c or {}).get("value", "") or ""
+    body += entry.get("summary", "") or entry.get("description", "") or ""
+    m = re.search(r"<img[^>]+src=[\"']([^\"']+)[\"']", body, re.IGNORECASE)
+    if m and ok(m.group(1)):
+        return m.group(1)
+    return None
+
+
 def fetch_rss_feed(name: str, url: str, max_articles: int = 5) -> list[Article]:
     """Fetch articles from an RSS feed."""
     articles = []
@@ -575,7 +610,8 @@ def fetch_rss_feed(name: str, url: str, max_articles: int = 5) -> list[Article]:
                 link=entry.get('link', ''),
                 summary=summary,
                 source=name,
-                published=published
+                published=published,
+                image=_entry_image(entry),
             ))
 
             if len(articles) >= max_articles:
@@ -770,6 +806,7 @@ def fetch_huggingface(max_papers: int = 12, max_models: int = 8) -> list[Article
                 title=(item.get("title") or paper.get("title") or "Untitled paper").strip(),
                 link=f"https://huggingface.co/papers/{pid}" if pid else "https://huggingface.co/papers",
                 summary=summary[:500], source="Hugging Face Papers", published=published,
+                image=item.get("thumbnail") if str(item.get("thumbnail", "")).startswith("http") else None,
             ))
     except Exception as e:
         print(f"  ⚠️ Hugging Face papers failed: {e}")
@@ -1288,7 +1325,9 @@ The three most consequential developments in the world and in national governmen
 hours: what a well-informed person must know today regardless of personal interests. Draw on "Google News Top
 Stories", "Google News · World", "Google News · U.S." and the major outlets. Favor what a government, court,
 central bank, or military actually DID — an order, a ruling, a strike, a shutdown, a rate move, a law — over what
-someone said or predicted. One item per story: what happened, why it matters in one line, the link. No padding:
+someone said or predicted. One item per story: what happened, why it matters in one line, the link. When the
+same story appears both from a "Google News" source and from a publisher's own feed, link the publisher's article,
+not the Google News copy. No padding:
 if only two things truly qualify, include two. A fourth item is allowed ONLY on a genuinely extraordinary
 day — when leaving it out would be an obvious omission to anyone who read the news that day, such as a
 second event of the same scale as the first. Never five. The default is three.
@@ -1737,6 +1776,122 @@ def extract_top_topics(html_content: str) -> list[str]:
                 break
 
     return topics[:5]
+
+
+# =============================================================================
+# Pictures for the top sections. Deterministic post-processing of Claude's
+# HTML: for each article link in the configured sections, use the thumbnail
+# the feed provided, else fetch the page once for its social-preview image
+# (og:image / twitter:image). Remote <img> links, never embedded, capped.
+#   DIGEST_IMAGES=true            master switch
+#   DIGEST_MAX_IMAGES=8           total images per email
+#   DIGEST_IMAGE_SECTIONS         comma-separated h2 substrings (case-insensitive)
+# =============================================================================
+
+_PREVIEW_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+               "Chrome/129.0 Safari/537.36")
+_PREVIEW_SKIP_HOSTS = ("news.google.com", "reddit.com", "news.ycombinator.com", "x.com", "twitter.com")
+_OG_IMAGE_RE = re.compile(
+    r"<meta[^>]+(?:property|name)=[\"'](?:og:image(?::secure_url)?|twitter:image(?::src)?)[\"'][^>]+content=[\"']([^\"']+)[\"']"
+    r"|<meta[^>]+content=[\"']([^\"']+)[\"'][^>]+(?:property|name)=[\"'](?:og:image(?::secure_url)?|twitter:image(?::src)?)[\"']",
+    re.IGNORECASE,
+)
+
+
+def fetch_preview_image(url: str, timeout: float = 6.0) -> Optional[str]:
+    """The page's og:image / twitter:image, reading at most 256 KB of HTML.
+    None on anything unusual; never raises."""
+    try:
+        host = urllib.parse.urlsplit(url).hostname or ""
+        if not url.startswith(("http://", "https://")) or any(h in host for h in _PREVIEW_SKIP_HOSTS):
+            return None
+        with requests.get(url, headers={"User-Agent": _PREVIEW_UA, "Accept": "text/html,*/*;q=0.8"},
+                          timeout=timeout, stream=True, allow_redirects=True) as resp:
+            if resp.status_code != 200 or "html" not in resp.headers.get("content-type", "").lower():
+                return None
+            chunks, size = [], 0
+            for chunk in resp.iter_content(16384):
+                chunks.append(chunk); size += len(chunk)
+                if size >= 262144:
+                    break
+            head = b"".join(chunks).decode("utf-8", errors="ignore")
+        m = _OG_IMAGE_RE.search(head)
+        if not m:
+            return None
+        img = html.unescape(m.group(1) or m.group(2) or "").strip()
+        img = urllib.parse.urljoin(resp.url, img)
+        return img if img.startswith("http") else None
+    except Exception:
+        return None
+
+
+def _norm_link(u: str) -> str:
+    return (u or "").strip().split("#")[0].rstrip("/").lower()
+
+
+def _norm_title(t: str) -> str:
+    """Headline key for cross-source matching: strip Google News' ' - Outlet'
+    suffix, punctuation and case."""
+    t = re.sub(r"\s+[-–—|]\s+[^-–—|]{2,40}$", "", (t or "").strip())
+    return re.sub(r"[^a-z0-9 ]+", "", t.lower()).strip()
+
+
+def add_images(digest_html: str, articles: list, max_images: Optional[int] = None,
+               sections: Optional[list[str]] = None) -> str:
+    """Insert a thumbnail under each linked item in the target sections.
+    Feed-provided image first, page preview as fallback. Best-effort."""
+    try:
+        if os.getenv("DIGEST_IMAGES", "true").lower() != "true":
+            return digest_html
+        max_images = max_images if max_images is not None else int(os.getenv("DIGEST_MAX_IMAGES", "8"))
+        sections = sections or [x.strip().lower() for x in
+                                os.getenv("DIGEST_IMAGE_SECTIONS", "three things,top priority").split(",") if x.strip()]
+        by_link = {_norm_link(a.link): a for a in articles}
+        # Same headline from a direct feed that DID carry a picture — covers
+        # Google News links (no image, redirect page unreadable).
+        by_title = {}
+        for a in articles:
+            if a.image:
+                by_title.setdefault(_norm_title(a.title), a)
+        soup = BeautifulSoup(digest_html, "html.parser")
+        added = fetched = 0
+        for h2 in soup.find_all("h2"):
+            title = h2.get_text(" ", strip=True).lower()
+            if not any(sec in title for sec in sections):
+                continue
+            node = h2.find_next_sibling()
+            while node is not None and node.name != "h2":
+                if node.name == "ul":
+                    for li in node.find_all("li", recursive=False):
+                        if added >= max_images:
+                            break
+                        a = li.find("a", href=True)
+                        if not a or li.find("img"):
+                            continue
+                        art = by_link.get(_norm_link(a["href"]))
+                        img = art.image if art and art.image else None
+                        if not img:
+                            for key in (_norm_title(art.title) if art else "", _norm_title(a.get_text(" ", strip=True))):
+                                if key and key in by_title:
+                                    img = by_title[key].image
+                                    break
+                        if not img and fetched < max_images * 2:
+                            fetched += 1
+                            img = fetch_preview_image(a["href"])
+                        if not img:
+                            continue
+                        tag = soup.new_tag("img", src=img, alt="")
+                        tag["style"] = ("display:block;max-width:100%;width:560px;height:auto;"
+                                        "border-radius:6px;margin:8px 0 4px 0;")
+                        li.append(tag)
+                        added += 1
+                node = node.find_next_sibling()
+        if added:
+            print(f"🖼️ Images: {added} added ({fetched} preview lookups)")
+        return str(soup)
+    except Exception as e:
+        print(f"⚠️ Image step failed (digest unaffected): {e}")
+        return digest_html
 
 
 # =============================================================================
@@ -2191,6 +2346,9 @@ def main():
             sys.exit(1)
 
         print("✓ Digest generated\n")
+
+        # Step 2a: pictures under the top sections (deterministic; never fails the digest)
+        digest_html = add_images(digest_html, articles)
 
         # Step 2b: Weekly web-grounded sweep (optional; never fails the digest).
         # Off by default — set SWEEP_ENABLED=true and define your lanes in
