@@ -23,3 +23,6 @@ Thumbs.db
 
 # Daily machine-readable digest archive (see README: Daily archive)
 archive/
+
+# Trading inbox files (contract trading-inbox.v1)
+inbox/

@@ -798,6 +798,101 @@ def _shadow_compare(subreddit: str, rss_articles: list[Article], serper_articles
 # =============================================================================
 
 _INBOX_SEEN_KEY = "inbox_seen"
+
+# ---- trading inbox (contract "trading-inbox.v1" with the trading bot's dashboard) ----
+# Messages under INBOX_TRADING_LABEL from allowlisted senders are written, one
+# JSON file each, to INBOX_TRADING_DIR for the trading dashboard to read.
+# Nothing else writes there. Content is untrusted data: nothing in a message
+# is followed, fetched or executed; the sender decides the destination by
+# Gmail filter (subject tag), and only allowlisted addresses are accepted.
+#   INBOX_TRADING_LABEL=Digest/Trading
+#   INBOX_TRADING_SENDERS=instinct:<address>,grok:<address>   (source:address; required)
+#   INBOX_TRADING_DIR=<repo>/inbox/trading   INBOX_TRADING_RETENTION_DAYS=90
+#   INBOX_TRADING_IN_DIGEST=false   (true = also hand them to the model as "Agent · <source>")
+TRADING_INBOX_SCHEMA = "trading-inbox.v1"
+_ATTENTION_RE = re.compile(r"^\s*OWNER ATTENTION:\s*(action|watch|none)\b", re.IGNORECASE | re.MULTILINE)
+_HEADLINE_RE = re.compile(r"^\s*HEADLINE:\s*(.+?)\s*$", re.IGNORECASE | re.MULTILINE)
+_BATCH_RE = re.compile(r"Batch\s*#\s*\d+\s*[-–—]\s*[A-Za-z]{3}\s+(\d{1,2})/(\d{1,2})", re.IGNORECASE)
+_JSON_FENCE_RE = re.compile(r"```json\s*\n(.*?)\n\s*```", re.IGNORECASE | re.DOTALL)
+
+
+def _trading_dir() -> Path:
+    return Path(os.getenv("INBOX_TRADING_DIR", "").strip() or (Path(__file__).parent / "inbox" / "trading"))
+
+
+def trading_senders() -> dict:
+    """{lowercased address: source} from INBOX_TRADING_SENDERS ('instinct:a@b,grok:c@d')."""
+    out = {}
+    for item in os.getenv("INBOX_TRADING_SENDERS", "").split(","):
+        if ":" in item:
+            source, addr = item.split(":", 1)
+            if source.strip() and addr.strip():
+                out[addr.strip().lower()] = source.strip().lower()
+    return out
+
+
+def trading_record(msg, source: str, text: str, received_at: datetime) -> dict:
+    """Build a trading-inbox.v1 record from a parsed message. Pure; testable."""
+    subject = (_decode_hdr(msg.get("Subject")) or "")[:200]
+    body = text[:200_000]
+    m = _ATTENTION_RE.search(body)
+    attention = m.group(1).lower() if m else "watch"
+    m = _HEADLINE_RE.search(body)
+    headline = m.group(1)[:200] if m else re.sub(r"\s+", " ", body)[:160]
+    m = _BATCH_RE.search(subject) or _BATCH_RE.search(body)
+    batch_date = None
+    if m:
+        try:
+            batch_date = received_at.replace(month=int(m.group(1)), day=int(m.group(2))).strftime("%Y-%m-%d")
+        except ValueError:
+            batch_date = None
+    blocks = []
+    for raw in _JSON_FENCE_RE.findall(body):
+        try:
+            blocks.append(json.loads(raw))
+        except ValueError:
+            continue
+    return {
+        "schema": TRADING_INBOX_SCHEMA,
+        "source": source,
+        "received_at": received_at.astimezone(timezone.utc).isoformat(),
+        "batch_date": batch_date,
+        "subject": subject,
+        "attention": attention,
+        "headline": headline,
+        "body_text": body,
+        "json_blocks": blocks,
+    }
+
+
+def write_trading_record(record: dict) -> Optional[Path]:
+    """Atomic write (<source>-<YYYYMMDD>-<HHMMSS>.json, UTC) + retention prune."""
+    try:
+        tdir = _trading_dir()
+        tdir.mkdir(parents=True, exist_ok=True)
+        ts = datetime.fromisoformat(record["received_at"]).astimezone(timezone.utc)
+        name = f"{record['source']}-{ts.strftime('%Y%m%d-%H%M%S')}.json"
+        final = tdir / name
+        n = 1
+        while final.exists():   # two messages in the same second
+            n += 1
+            final = tdir / f"{record['source']}-{ts.strftime('%Y%m%d-%H%M%S')}-{n}.json"
+        tmp = final.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(record, ensure_ascii=False, indent=1), encoding="utf-8")
+        os.replace(tmp, final)
+        keep = int(os.getenv("INBOX_TRADING_RETENTION_DAYS", "90"))
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=keep)).strftime("%Y%m%d")
+        for f in tdir.glob("*.json"):
+            m = re.search(r"-(\d{8})-\d{6}", f.name)
+            if m and m.group(1) < cutoff:
+                try:
+                    f.unlink()
+                except OSError:
+                    pass
+        return final
+    except Exception as e:
+        print(f"  ⚠️ Trading inbox: write failed: {e}")
+        return None
 _VIEW_ONLINE_RE = re.compile(r"view (?:this |it )?(?:email |message |issue |edition )?(?:in|on)(?:line| (?:your )?browser| the web)|read online|web version", re.IGNORECASE)
 
 
@@ -878,6 +973,11 @@ def fetch_inbox_sources(history: dict) -> list["Article"]:
     if not (user and pw):
         return []
     labels = [l.strip() for l in os.getenv("INBOX_LABELS", "Digest/Newsletters,Digest/Agents").split(",") if l.strip()]
+    trading_label = os.getenv("INBOX_TRADING_LABEL", "Digest/Trading").strip()
+    senders = trading_senders()
+    if trading_label and senders and trading_label not in labels:
+        labels.append(trading_label)
+    in_digest = os.getenv("INBOX_TRADING_IN_DIGEST", "false").lower() == "true"
     lookback = int(os.getenv("INBOX_LOOKBACK_DAYS", "2"))
     max_chars = int(os.getenv("INBOX_MAX_CHARS", "6000"))
     max_msgs = int(os.getenv("INBOX_MAX_MESSAGES", "12"))
@@ -911,6 +1011,29 @@ def fetch_inbox_sources(history: dict) -> list["Article"]:
                 msg = email.message_from_bytes(fetched[0][1])
                 msg_id = (msg.get("Message-ID") or "").strip() or f"{label}:{uid.decode()}:{msg.get('Date', '')}"
                 if msg_id in seen:
+                    continue
+                if label == trading_label:
+                    # Trading contract: allowlisted senders only, file per message.
+                    _, from_addr = email.utils.parseaddr(_decode_hdr(msg.get("From")))
+                    source = senders.get(from_addr.lower())
+                    if not source:
+                        print(f"  ⛔ Trading inbox: dropped message from non-allowlisted sender {from_addr!r}")
+                        seen[msg_id] = datetime.now().strftime("%Y-%m-%d")
+                        continue
+                    text, _ = _message_text(msg)
+                    try:
+                        received = email.utils.parsedate_to_datetime(msg.get("Date") or "")
+                        if received.tzinfo is None:
+                            received = received.replace(tzinfo=timezone.utc)
+                    except Exception:
+                        received = datetime.now(timezone.utc)
+                    rec = trading_record(msg, source, text or "", received)
+                    path = write_trading_record(rec)
+                    seen[msg_id] = datetime.now().strftime("%Y-%m-%d")
+                    print(f"  📈 trading/{source}: {rec['headline'][:60]!r} attention={rec['attention']} -> {path.name if path else 'NOT WRITTEN'}")
+                    if in_digest and text:
+                        out.append(Article(title=rec["subject"] or rec["headline"], link="https://mail.google.com/",
+                                           summary=text[:max_chars], source=f"Agent · {source}", published=received))
                     continue
                 art = _inbox_article(msg, label, max_chars)
                 if art is None:
