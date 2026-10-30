@@ -975,8 +975,13 @@ def fetch_inbox_sources(history: dict) -> list["Article"]:
     labels = [l.strip() for l in os.getenv("INBOX_LABELS", "Digest/Newsletters,Digest/Agents").split(",") if l.strip()]
     trading_label = os.getenv("INBOX_TRADING_LABEL", "Digest/Trading").strip()
     senders = trading_senders()
-    if trading_label and senders and trading_label not in labels:
+    # With no allowlist yet, still open the trading label in DISCOVERY mode:
+    # nothing is written, but every sender address seen there is recorded in
+    # history["inbox_trading_senders_seen"] (synced off-box) and the run log,
+    # so the owner can copy it into INBOX_TRADING_SENDERS.
+    if trading_label and trading_label not in labels:
         labels.append(trading_label)
+    seen_senders: dict = history.setdefault("inbox_trading_senders_seen", {})
     in_digest = os.getenv("INBOX_TRADING_IN_DIGEST", "false").lower() == "true"
     lookback = int(os.getenv("INBOX_LOOKBACK_DAYS", "2"))
     max_chars = int(os.getenv("INBOX_MAX_CHARS", "6000"))
@@ -1014,9 +1019,15 @@ def fetch_inbox_sources(history: dict) -> list["Article"]:
                     continue
                 if label == trading_label:
                     # Trading contract: allowlisted senders only, file per message.
-                    _, from_addr = email.utils.parseaddr(_decode_hdr(msg.get("From")))
+                    from_name, from_addr = email.utils.parseaddr(_decode_hdr(msg.get("From")))
                     source = senders.get(from_addr.lower())
                     if not source:
+                        seen_senders[from_addr.lower()] = {"name": from_name, "last_seen": datetime.now().strftime("%Y-%m-%d"),
+                                                           "subject": (_decode_hdr(msg.get("Subject")) or "")[:80]}
+                        if not senders:
+                            print(f"  📈 Trading inbox (discovery): message from {from_name!r} <{from_addr}> — "
+                                  f"add INBOX_TRADING_SENDERS=<source>:{from_addr} to .env to start writing files")
+                            continue   # not marked seen: it is written once the allowlist exists
                         print(f"  ⛔ Trading inbox: dropped message from non-allowlisted sender {from_addr!r}")
                         seen[msg_id] = datetime.now().strftime("%Y-%m-%d")
                         continue
