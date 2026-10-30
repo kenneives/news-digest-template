@@ -187,6 +187,20 @@ rule there that forwards mail from the sender to the digest's Gmail address.
 
 ---
 
+## Grid layout (EMAIL_LAYOUT=grid)
+
+`email_layout.py` re-lays-out the model's sectioned HTML as a table-based,
+email-safe grid: three cards for the lead section, two-column thumbnail rows
+for the topic sections, paired side-by-side lists, image tiles for the
+"popular" section, the weekly sweep as cards per lane with severity tags, and
+the podcast card at the bottom. Columns are table cells that stack on phones
+via a media query; the palette follows the OS through `prefers-color-scheme`
+with light as the fallback; missing pictures get a source-monogram tile.
+Content is never rewritten, and a section the router doesn't recognise renders
+as a plain box. `EMAIL_LAYOUT=classic` (default) keeps the original template.
+
+---
+
 ## Daily Watch Feeds (Optional)
 
 A weekly sweep has a five-day latency ceiling. For names you care about

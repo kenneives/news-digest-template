@@ -26,3 +26,5 @@ archive/
 
 # Trading inbox files (contract trading-inbox.v1)
 inbox/
+
+.playwright-mcp/

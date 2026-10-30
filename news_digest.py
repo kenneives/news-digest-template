@@ -45,6 +45,11 @@ try:
     import web_sweep
 except ImportError:
     web_sweep = None
+# Grid email layout (optional; EMAIL_LAYOUT=grid). Classic template is the default.
+try:
+    import email_layout
+except ImportError:
+    email_layout = None
 
 load_dotenv()
 
@@ -2143,9 +2148,12 @@ def add_images(digest_html: str, articles: list, max_images: Optional[int] = Non
     try:
         if os.getenv("DIGEST_IMAGES", "true").lower() != "true":
             return digest_html
-        max_images = max_images if max_images is not None else int(os.getenv("DIGEST_MAX_IMAGES", "8"))
+        grid_mode = os.getenv("EMAIL_LAYOUT", "classic").strip().lower() == "grid"
+        max_images = max_images if max_images is not None else int(os.getenv("DIGEST_MAX_IMAGES", "40" if grid_mode else "8"))
+        max_fetch = int(os.getenv("DIGEST_MAX_PREVIEW_FETCHES", "12"))
         sections = sections or [x.strip().lower() for x in
-                                os.getenv("DIGEST_IMAGE_SECTIONS", "three things,top priority").split(",") if x.strip()]
+                                os.getenv("DIGEST_IMAGE_SECTIONS", "*" if grid_mode else "three things,top priority").split(",") if x.strip()]
+        skip = ("bot activity", "web sweep", "tonight", "from the inbox")
         by_link = {_norm_link(a.link): a for a in articles}
         # Same headline from a direct feed that DID carry a picture — covers
         # Google News links (no image, redirect page unreadable).
@@ -2157,7 +2165,9 @@ def add_images(digest_html: str, articles: list, max_images: Optional[int] = Non
         added = fetched = 0
         for h2 in soup.find_all("h2"):
             title = h2.get_text(" ", strip=True).lower()
-            if not any(sec in title for sec in sections):
+            if any(k in title for k in skip):
+                continue
+            if "*" not in sections and not any(sec in title for sec in sections):
                 continue
             node = h2.find_next_sibling()
             while node is not None and node.name != "h2":
@@ -2175,7 +2185,7 @@ def add_images(digest_html: str, articles: list, max_images: Optional[int] = Non
                                 if key and key in by_title:
                                     img = by_title[key].image
                                     break
-                        if not img and fetched < max_images * 2:
+                        if not img and fetched < max_fetch:
                             fetched += 1
                             img = fetch_preview_image(a["href"])
                         if not img:
@@ -2946,9 +2956,26 @@ def main():
         else:
             print("⏭️ Podcast pipeline skipped (AUDIO_OUTPUT_DIR not set)\n")
 
-        # Step 4: Send email
+        # Step 4: Send email (classic template, or the grid layout when EMAIL_LAYOUT=grid)
         print("📧 Sending email...")
-        success = send_email(digest_html, podcast_url=podcast_url, top_topics=top_topics)
+        outgoing_html = digest_html
+        if os.getenv("EMAIL_LAYOUT", "classic").strip().lower() == "grid" and email_layout is not None:
+            try:
+                digest_title = os.getenv("DIGEST_TITLE", "Daily Digest")
+                outgoing_html = email_layout.render_grid_email(
+                    digest_html,
+                    title=f"🗞️ {digest_title}",
+                    date_line=(f"{datetime.now().strftime('%A, %B %d, %Y')} · {RUN_STATS.get('fetched', 0)} articles read, "
+                               f"{RUN_STATS.get('kept', 0)} kept"),
+                    podcast_url=podcast_url, top_topics=top_topics,
+                    colophon=(f"Generated {datetime.now().strftime('%A, %B %d, %Y at %H:%M')} by your News Digest bot. "
+                              f"Powered by Claude · {RUN_STATS.get('sources', len(RSS_FEEDS))} sources."),
+                )
+                print("  🧱 Grid layout rendered")
+            except Exception as e:
+                print(f"⚠️ Grid layout failed, sending the classic template: {e}")
+                outgoing_html = digest_html
+        success = send_email(outgoing_html, podcast_url=podcast_url, top_topics=top_topics)
 
         if success:
             write_archive(digest_html, articles, history, email_sent=True, podcast_url=podcast_url)
