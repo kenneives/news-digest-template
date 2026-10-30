@@ -1881,7 +1881,9 @@ def add_images(digest_html: str, articles: list, max_images: Optional[int] = Non
                         if not img:
                             continue
                         tag = soup.new_tag("img", src=img, alt="")
-                        tag["style"] = ("display:block;max-width:100%;width:560px;height:auto;"
+                        tag["class"] = "digest-img"
+                        # Half-width on desktop; the email's @media rule makes it full-width on phones.
+                        tag["style"] = ("display:block;max-width:100%;width:280px;height:auto;"
                                         "border-radius:6px;margin:8px 0 4px 0;")
                         li.append(tag)
                         added += 1
@@ -2209,6 +2211,10 @@ def send_email(html_content: str, podcast_url: str | None = None, top_topics: li
         /* Special styling for job radar section */
         h2:has(+ ul li strong) {{
             color: #2f855a;
+        }}
+        /* Article pictures: half-width on desktop, full-width on phones */
+        @media only screen and (max-width: 600px) {{
+            img.digest-img {{ width: 100% !important; max-width: 100% !important; }}
         }}
     </style>
 </head>
