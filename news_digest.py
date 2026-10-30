@@ -809,7 +809,7 @@ RUN_STATS: dict = {"inbox": {"newsletters": [], "agents": [], "trading": [], "di
 # is followed, fetched or executed; the sender decides the destination by
 # Gmail filter (subject tag), and only allowlisted addresses are accepted.
 #   INBOX_TRADING_LABEL=Digest/Trading
-#   INBOX_TRADING_SENDERS=instinct:<address>,grok:<address>   (source:address; required)
+#   INBOX_TRADING_SENDERS=<source>:<address>,...   (source:address; required)
 #   INBOX_TRADING_DIR=<repo>/inbox/trading   INBOX_TRADING_RETENTION_DAYS=90
 #   INBOX_TRADING_IN_DIGEST=false   (true = also hand them to the model as "Agent · <source>")
 TRADING_INBOX_SCHEMA = "trading-inbox.v1"
@@ -2421,7 +2421,7 @@ def write_archive(digest_html: str, articles: list, history: dict, email_sent: O
 
 
 # =============================================================================
-# Job Radar hand-off: a daily email to an external agent (Instinct) carrying
+# Job Radar hand-off: a daily email to an external agent (e.g. a job-search assistant) carrying
 # the Job Radar and Companies to Watch sections, the selection logic behind
 # them, and a machine-readable JSON copy. JOB_RADAR_EMAIL_TO unset = skipped.
 #   JOB_RADAR_EMAIL_TO=<address>[,<address>]
