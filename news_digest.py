@@ -799,6 +799,9 @@ def _shadow_compare(subreddit: str, rss_articles: list[Article], serper_articles
 
 _INBOX_SEEN_KEY = "inbox_seen"
 
+# Per-run facts for the "🤖 Bot Activity" footer (filled in as the run goes).
+RUN_STATS: dict = {"inbox": {"newsletters": [], "agents": [], "trading": [], "discovered": []}}
+
 # ---- trading inbox (contract "trading-inbox.v1" with the trading bot's dashboard) ----
 # Messages under INBOX_TRADING_LABEL from allowlisted senders are written, one
 # JSON file each, to INBOX_TRADING_DIR for the trading dashboard to read.
@@ -1025,6 +1028,7 @@ def fetch_inbox_sources(history: dict) -> list["Article"]:
                         seen_senders[from_addr.lower()] = {"name": from_name, "last_seen": datetime.now().strftime("%Y-%m-%d"),
                                                            "subject": (_decode_hdr(msg.get("Subject")) or "")[:80]}
                         if not senders:
+                            RUN_STATS["inbox"]["discovered"].append(from_addr.lower())
                             print(f"  📈 Trading inbox (discovery): message from {from_name!r} <{from_addr}> — "
                                   f"add INBOX_TRADING_SENDERS=<source>:{from_addr} to .env to start writing files")
                             continue   # not marked seen: it is written once the allowlist exists
@@ -1041,6 +1045,8 @@ def fetch_inbox_sources(history: dict) -> list["Article"]:
                     rec = trading_record(msg, source, text or "", received)
                     path = write_trading_record(rec)
                     seen[msg_id] = datetime.now().strftime("%Y-%m-%d")
+                    RUN_STATS["inbox"]["trading"].append({"source": source, "attention": rec["attention"],
+                                                          "headline": rec["headline"][:70], "written": bool(path)})
                     print(f"  📈 trading/{source}: {rec['headline'][:60]!r} attention={rec['attention']} -> {path.name if path else 'NOT WRITTEN'}")
                     if in_digest and text:
                         out.append(Article(title=rec["subject"] or rec["headline"], link="https://mail.google.com/",
@@ -1051,6 +1057,7 @@ def fetch_inbox_sources(history: dict) -> list["Article"]:
                     continue
                 seen[msg_id] = datetime.now().strftime("%Y-%m-%d")
                 out.append(art)
+                RUN_STATS["inbox"]["agents" if art.source.startswith("Agent") else "newsletters"].append(art.source.split("·", 1)[-1].strip())
                 print(f"  📬 {art.source}: {art.title[:70]}")
     except Exception as e:
         print(f"  ⚠️ Inbox: {e}")
@@ -1160,6 +1167,8 @@ def fetch_all_news() -> list[Article]:
     hf = fetch_huggingface()
     all_articles.extend(hf)
     print(f"  Got {len(hf)} articles")
+    RUN_STATS["sources"] = len(RSS_FEEDS) + len(watch_feeds()) + 1   # + Hugging Face
+    RUN_STATS["reddit_via"] = "Google (Serper)" if source == "serper" or (shadow and serper_configured()) else "RSS"
 
     # Daily watch feeds (Google News queries for tracked names)
     for name, url in watch_feeds():
@@ -2179,12 +2188,137 @@ def add_images(digest_html: str, articles: list, max_images: Optional[int] = Non
                         li.append(tag)
                         added += 1
                 node = node.find_next_sibling()
+        RUN_STATS["images"] = added
         if added:
             print(f"🖼️ Images: {added} added ({fetched} preview lookups)")
         return str(soup)
     except Exception as e:
         print(f"⚠️ Image step failed (digest unaffected): {e}")
         return digest_html
+
+
+# =============================================================================
+# "🤖 Bot Activity" footer: one short section, built in code, saying what the
+# digest and the other bots did since yesterday. Trading-bot facts come from
+# its advisor gateway on this box when ADVISOR_API_TOKEN is set (read-only).
+#   ADVISOR_URL=http://127.0.0.1:8060   ADVISOR_API_TOKEN=<bearer token>
+# =============================================================================
+
+def _gateway_summary() -> Optional[dict]:
+    token = os.getenv("ADVISOR_API_TOKEN", "").strip()
+    if not token:
+        return None
+    base = os.getenv("ADVISOR_URL", "http://127.0.0.1:8060").rstrip("/")
+    hdr = {"Authorization": f"Bearer {token}"}
+
+    def get(path, params=None):
+        try:
+            r = requests.get(base + path, headers=hdr, params=params, timeout=6)
+            return r.json() if r.status_code == 200 else None
+        except Exception:
+            return None
+
+    out: dict = {"reachable": False}
+    health = get("/v1/health")
+    if not isinstance(health, dict):
+        return out
+    out.update({"reachable": True, "version": health.get("gateway_version"), "paper": health.get("paper"),
+                "executor": health.get("executor_enabled"), "kill": health.get("advisor_kill_switch")})
+    status = get("/v1/context/status")
+    if isinstance(status, dict):
+        out["equity"] = status.get("equity"); out["cash"] = status.get("cash"); out["regime"] = status.get("regime")
+        out["bot_kill"] = status.get("bot_kill_switch") or status.get("kill_switch")
+    trades = get("/v1/trades", {"days": 1, "limit": 500})
+    if isinstance(trades, list):
+        out["fills_24h"] = len(trades)
+        out["pnl_24h"] = round(sum(float(t.get("realized_pnl") or 0) for t in trades), 2)
+    props = get("/v1/proposals", {"limit": 20})
+    if isinstance(props, list):
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+        recent = [p for p in props if str(p.get("created_at", "")) >= cutoff[:19]]
+        by_src: dict = {}
+        for p in recent:
+            by_src.setdefault(str(p.get("source") or "advisor"), []).append(str(p.get("status") or "?"))
+        out["proposals_24h"] = by_src
+    return out
+
+
+def _fmt_money(v) -> str:
+    try:
+        return f"${float(v):,.0f}"
+    except (TypeError, ValueError):
+        return "n/a"
+
+
+def build_bot_activity_section(history: dict) -> str:
+    """Deterministic HTML for the footer. Never raises; empty string on failure."""
+    try:
+        st = RUN_STATS
+        lines: list[str] = []
+        # 1. the digest itself
+        bits = [f"{st.get('fetched', 0)} articles from {st.get('sources', len(RSS_FEEDS))} sources",
+                f"{st.get('kept', 0)} new after dedup"]
+        if st.get("images"):
+            bits.append(f"{st['images']} pictures")
+        bits.append(f"Reddit via {st.get('reddit_via', 'RSS')}")
+        lines.append(f"<li><strong>Digest</strong>: {' · '.join(html.escape(b) for b in bits)}</li>")
+        # 2. inbox
+        ib = st.get("inbox", {})
+        parts = []
+        if ib.get("newsletters"):
+            parts.append("newsletter" + ("s" if len(ib["newsletters"]) > 1 else "") + ": " + ", ".join(ib["newsletters"]))
+        if ib.get("agents"):
+            parts.append("agent notes: " + ", ".join(ib["agents"]))
+        for t in ib.get("trading", []):
+            tag = {"action": "ACTION", "watch": "watch", "none": "fyi"}.get(t["attention"], t["attention"])
+            parts.append(f"trading batch from {t['source']} [{tag}]: {t['headline']}" + ("" if t["written"] else " (NOT written)"))
+        for addr in ib.get("discovered", []):
+            parts.append(f"new trading sender seen, not yet allowlisted: {addr}")
+        lines.append(f"<li><strong>Inbox</strong>: {html.escape(' · '.join(parts)) if parts else 'nothing new'}</li>")
+        # 3. trading bot via the gateway
+        gw = _gateway_summary()
+        if gw is not None:
+            if not gw.get("reachable"):
+                lines.append("<li><strong>Trading bot</strong>: gateway not reachable</li>")
+            else:
+                tb = [f"paper equity {_fmt_money(gw.get('equity'))}"]
+                if gw.get("fills_24h") is not None:
+                    tb.append(f"{gw['fills_24h']} fills in 24h ({'+' if gw.get('pnl_24h', 0) >= 0 else ''}{gw.get('pnl_24h', 0):,.2f} realized)")
+                if gw.get("regime"):
+                    tb.append(f"regime {gw['regime']}")
+                tb.append("advisor kill switch " + ("TRIPPED" if gw.get("kill") else "clear"))
+                if gw.get("bot_kill"):
+                    tb.append("bot kill switch ON")
+                tb.append(f"gateway v{gw.get('version')}")
+                lines.append(f"<li><strong>Trading bot</strong>: {html.escape(' · '.join(tb))}</li>")
+                props = gw.get("proposals_24h") or {}
+                if props:
+                    desc = "; ".join(f"{src}: {len(sts)} ({', '.join(sorted(set(sts)))})" for src, sts in props.items())
+                    lines.append(f"<li><strong>Advisor proposals, 24h</strong>: {html.escape(desc)}</li>")
+                else:
+                    lines.append("<li><strong>Advisor proposals, 24h</strong>: none</li>")
+        # 4. sweep
+        meta = history.get("web_sweep_meta") or {}
+        today = datetime.now().strftime("%Y-%m-%d")
+        if meta.get("last_run_date") == today:
+            lanes = meta.get("lanes") or []
+            kept = sum(int(l.get("kept", 0)) for l in lanes)
+            errs = len(meta.get("lane_errors") or [])
+            lines.append(f"<li><strong>Weekly sweep</strong>: ran today, {kept} signals across {len(lanes)} lanes"
+                         + (f", {errs} lane(s) failed" if errs else "") + "</li>")
+        else:
+            sweep_day = os.getenv("SWEEP_DAY", "monday").capitalize()
+            lines.append(f"<li><strong>Weekly sweep</strong>: last ran {html.escape(meta.get('last_run_date') or 'never')}, next {sweep_day}</li>")
+        # 5. hand-offs
+        ho = ["archive written for the trading gateway (/v1/news)"]
+        if os.getenv("JOB_RADAR_EMAIL_TO", "").strip():
+            ho.append("Job Radar hand-off goes out right after this email")
+        lines.append(f"<li><strong>Hand-offs</strong>: {html.escape(' · '.join(ho))}</li>")
+        return ("<h2>🤖 Bot Activity</h2><ul>" + "".join(lines) + "</ul>"
+                "<p><em>Built in code from the run itself; nothing here came from the model.</em></p>")
+    except Exception as e:
+        print(f"⚠️ Bot Activity footer failed (digest unaffected): {e}")
+        return ""
 
 
 # =============================================================================
@@ -2665,6 +2799,8 @@ def main():
         print("\n🔍 Filtering duplicates...")
         articles = filter_duplicates(articles, history)
         print(f"✓ {len(articles)} new articles after filtering\n")
+        RUN_STATS["fetched"] = len(radar_source_articles)
+        RUN_STATS["kept"] = len(articles)
 
         if not articles:
             send_error_email(
@@ -2757,6 +2893,11 @@ def main():
                         digest_html += "\n" + sweep_html
             except Exception as e:
                 print(f"⚠️ Web sweep failed (digest unaffected): {e}")
+
+        # Step 2b2: "🤖 Bot Activity" footer — what every bot did since yesterday.
+        activity_html = build_bot_activity_section(history)
+        if activity_html:
+            digest_html += "\n" + activity_html
 
         # Step 2c: machine-readable archive of today's digest (before the
         # podcast/email so it exists even if those fail; refreshed after send).
