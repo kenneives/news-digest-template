@@ -2287,6 +2287,94 @@ def write_archive(digest_html: str, articles: list, history: dict, email_sent: O
 
 
 # =============================================================================
+# Job Radar hand-off: a daily email to an external agent (Instinct) carrying
+# the Job Radar and Companies to Watch sections, the selection logic behind
+# them, and a machine-readable JSON copy. JOB_RADAR_EMAIL_TO unset = skipped.
+#   JOB_RADAR_EMAIL_TO=<address>[,<address>]
+#   JOB_RADAR_EMAIL_SECTIONS=job radar,companies to watch   (h2 substrings)
+# =============================================================================
+
+JOB_RADAR_LOGIC = """How these items were chosen (the digest's standing logic):
+- Edit this to describe the reader's background, target lanes and what counts as a lead
+  (openings, team build-outs, funding rounds, executive moves). Items are leads to verify.
+"""
+
+
+def _smtp_send(recipients: list, subject: str, html_body: str, text_body: str) -> bool:
+    """Send one email through the digest's Gmail SMTP. Never raises."""
+    sender_email = os.getenv('GMAIL_ADDRESS')
+    app_password = os.getenv('GMAIL_APP_PASSWORD')
+    if not (sender_email and app_password and recipients):
+        return False
+    msg = MIMEMultipart('alternative')
+    msg['Subject'] = subject
+    msg['From'] = f"News Digest <{sender_email}>"
+    msg['To'] = ', '.join(recipients)
+    msg.attach(MIMEText(text_body, 'plain', 'utf-8'))
+    msg.attach(MIMEText(html_body, 'html', 'utf-8'))
+    try:
+        context = ssl.create_default_context()
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465, context=context) as server:
+            server.login(sender_email, app_password)
+            server.sendmail(sender_email, recipients, msg.as_string())
+        return True
+    except Exception as e:
+        print(f"  ⚠️ Email to {', '.join(recipients)} failed: {e}")
+        return False
+
+
+def build_job_radar_email(digest_html: str, sections_wanted: Optional[list] = None) -> Optional[tuple]:
+    """(subject, html, text) for the Job Radar hand-off, or None if the digest
+    has none of the wanted sections today. Pure; testable."""
+    wanted = sections_wanted or [x.strip().lower() for x in
+                                 os.getenv("JOB_RADAR_EMAIL_SECTIONS", "job radar,companies to watch").split(",") if x.strip()]
+    secs = [sec for sec in _sections_from_html(digest_html) if any(w in sec["title"].lower() for w in wanted)]
+    if not secs:
+        return None
+    today = datetime.now().strftime("%Y-%m-%d")
+    items = []
+    for sec in secs:
+        frag = BeautifulSoup(sec["html"], "html.parser")
+        for li in frag.find_all("li"):
+            a = li.find("a", href=True)
+            strong = li.find("strong")
+            items.append({
+                "section": sec["title"],
+                "name": (strong.get_text(" ", strip=True) if strong else (a.get_text(" ", strip=True) if a else ""))[:120],
+                "text": li.get_text(" ", strip=True)[:600],
+                "link": a["href"] if a else "",
+            })
+    payload = {"schema": "job-radar.v1", "date": today, "generated_at": datetime.now(timezone.utc).isoformat(),
+               "sections": [sec["title"] for sec in secs], "items": items}
+    subject = f"[jobs] Job Radar {today} — {len(items)} item(s)"
+    sec_html = "".join(f"<h2>{html.escape(sec['title'])}</h2>{sec['html']}" for sec in secs)
+    html_body = (f"<!DOCTYPE html><html><head><meta charset=\"utf-8\"></head><body style=\"font-family:-apple-system,Segoe UI,Helvetica,Arial,sans-serif;max-width:700px;margin:0 auto;padding:20px;color:#222\">"
+                 f"<p style=\"color:#666;font-size:13px\">Daily hand-off from the news digest, {today}. Machine context for an agent; "
+                 f"every item is a lead to verify.</p>{sec_html}"
+                 f"<h3>Selection logic</h3><pre style=\"white-space:pre-wrap;font-size:12px;background:#f5f5f5;padding:12px;border-radius:6px\">{html.escape(JOB_RADAR_LOGIC)}</pre>"
+                 f"<h3>Machine-readable copy</h3><pre style=\"white-space:pre-wrap;font-size:12px;background:#f5f5f5;padding:12px;border-radius:6px\">```json\n{html.escape(json.dumps(payload, ensure_ascii=False, indent=1))}\n```</pre>"
+                 f"</body></html>")
+    text_body = (f"Daily hand-off from the news digest, {today}. Every item is a lead to verify.\n\n"
+                 + "\n\n".join(f"{sec['title']}\n{sec['text']}" for sec in secs)
+                 + f"\n\nSELECTION LOGIC\n{JOB_RADAR_LOGIC}\n\nMACHINE-READABLE COPY\n```json\n{json.dumps(payload, ensure_ascii=False, indent=1)}\n```\n")
+    return subject, html_body, text_body
+
+
+def send_job_radar_email(digest_html: str) -> bool:
+    recipients = [r.strip() for r in os.getenv("JOB_RADAR_EMAIL_TO", "").split(",") if r.strip()]
+    if not recipients:
+        return False
+    built = build_job_radar_email(digest_html)
+    if built is None:
+        print("  💼 Job Radar hand-off: no job sections today — nothing sent")
+        return False
+    subject, html_body, text_body = built
+    ok = _smtp_send(recipients, subject, html_body, text_body)
+    print(f"  💼 Job Radar hand-off {'sent' if ok else 'FAILED'} → {', '.join(recipients)}: {subject}")
+    return ok
+
+
+# =============================================================================
 # Email Sending
 # =============================================================================
 
@@ -2723,6 +2811,11 @@ def main():
 
         if success:
             write_archive(digest_html, articles, history, email_sent=True, podcast_url=podcast_url)
+            # Daily Job Radar hand-off to an external agent (skipped unless JOB_RADAR_EMAIL_TO is set)
+            try:
+                send_job_radar_email(digest_html)
+            except Exception as e:
+                print(f"⚠️ Job Radar hand-off failed (digest unaffected): {e}")
             # Mark articles as sent so they won't be included tomorrow
             print("💾 Saving article history...")
             history = mark_articles_as_sent(articles, history)
