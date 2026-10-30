@@ -18,6 +18,10 @@ import time
 import traceback
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import email
+import email.utils
+import imaplib
+from email.header import decode_header, make_header
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
@@ -781,6 +785,150 @@ def _shadow_compare(subreddit: str, rss_articles: list[Article], serper_articles
 
 
 # =============================================================================
+# Inbox sources: newsletters you forward and notes from your agents, read
+# over IMAP from the same Gmail account the digest sends from. Anything under
+# the configured labels from the last INBOX_LOOKBACK_DAYS becomes a source
+# with its full text (up to INBOX_MAX_CHARS), so a weekly analyst letter
+# reaches the model whole. Messages are read with BODY.PEEK and the mailbox
+# is opened read-only, so they stay unread. Each message is used once
+# (history["inbox_seen"], Message-ID keyed, 14-day memory).
+#   INBOX_ENABLED=true
+#   INBOX_LABELS=Digest/Newsletters,Digest/Agents   (Gmail labels; nested = "/")
+#   INBOX_LOOKBACK_DAYS=2   INBOX_MAX_CHARS=6000   INBOX_MAX_MESSAGES=12
+# =============================================================================
+
+_INBOX_SEEN_KEY = "inbox_seen"
+_VIEW_ONLINE_RE = re.compile(r"view (?:this |it )?(?:email |message |issue |edition )?(?:in|on)(?:line| (?:your )?browser| the web)|read online|web version", re.IGNORECASE)
+
+
+def _decode_hdr(value) -> str:
+    try:
+        return str(make_header(decode_header(value or "")))
+    except Exception:
+        return str(value or "")
+
+
+def _message_text(msg) -> tuple[str, str]:
+    """(plain text, web link) for an email.message.Message. Prefers text/plain;
+    falls back to HTML stripped with BeautifulSoup. The link is the newsletter's
+    'view in browser' URL when it has one, else ''."""
+    plain, html_body = "", ""
+    parts = msg.walk() if msg.is_multipart() else [msg]
+    for part in parts:
+        ctype = part.get_content_type()
+        if part.get_content_disposition() == "attachment":
+            continue
+        try:
+            payload = part.get_payload(decode=True)
+        except Exception:
+            payload = None
+        if not payload:
+            continue
+        charset = part.get_content_charset() or "utf-8"
+        text = payload.decode(charset, errors="replace")
+        if ctype == "text/plain" and not plain:
+            plain = text
+        elif ctype == "text/html" and not html_body:
+            html_body = text
+    link = ""
+    if html_body:
+        soup = BeautifulSoup(html_body, "html.parser")
+        for a in soup.find_all("a", href=True):
+            if _VIEW_ONLINE_RE.search(a.get_text(" ", strip=True) or ""):
+                link = a["href"].strip()
+                break
+        if not plain:
+            for t in soup(["script", "style", "head"]):
+                t.decompose()
+            plain = soup.get_text("\n", strip=True)
+    plain = re.sub(r"\n{3,}", "\n\n", plain.replace("\r", "")).strip()
+    return plain, link
+
+
+def _inbox_article(msg, label: str, max_chars: int) -> Optional["Article"]:
+    """Turn one message into an Article. Pure apart from parsing; testable."""
+    subject = _decode_hdr(msg.get("Subject")) or "(no subject)"
+    from_name, from_addr = email.utils.parseaddr(_decode_hdr(msg.get("From")))
+    from_name = from_name or from_addr.split("@")[0] or "unknown sender"
+    text, link = _message_text(msg)
+    if not text:
+        return None
+    kind = label.rsplit("/", 1)[-1].rstrip("s") or "Inbox"   # Newsletters -> Newsletter, Agents -> Agent
+    msg_id = (msg.get("Message-ID") or "").strip()
+    if not link:
+        link = (f"https://mail.google.com/mail/u/0/#search/rfc822msgid:{urllib.parse.quote(msg_id.strip('<>'))}"
+                if msg_id else "https://mail.google.com/")
+    published = None
+    try:
+        published = email.utils.parsedate_to_datetime(msg.get("Date") or "")
+        if published and published.tzinfo is None:
+            published = published.replace(tzinfo=timezone.utc)
+    except Exception:
+        published = None
+    body = text[:max_chars] + (" […]" if len(text) > max_chars else "")
+    return Article(title=subject, link=link, summary=body, source=f"{kind} · {from_name}", published=published)
+
+
+def fetch_inbox_sources(history: dict) -> list["Article"]:
+    """Read the configured Gmail labels over IMAP and return new messages as
+    Articles. Best-effort: any failure returns [] and prints why."""
+    if os.getenv("INBOX_ENABLED", "true").lower() != "true":
+        return []
+    user, pw = os.getenv("GMAIL_ADDRESS", "").strip(), os.getenv("GMAIL_APP_PASSWORD", "").strip()
+    if not (user and pw):
+        return []
+    labels = [l.strip() for l in os.getenv("INBOX_LABELS", "Digest/Newsletters,Digest/Agents").split(",") if l.strip()]
+    lookback = int(os.getenv("INBOX_LOOKBACK_DAYS", "2"))
+    max_chars = int(os.getenv("INBOX_MAX_CHARS", "6000"))
+    max_msgs = int(os.getenv("INBOX_MAX_MESSAGES", "12"))
+    seen: dict = history.setdefault(_INBOX_SEEN_KEY, {})
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=14)).strftime("%Y-%m-%d")
+    for k in [k for k, d in seen.items() if (d or "") < cutoff]:
+        seen.pop(k, None)
+    since = (datetime.now() - timedelta(days=lookback)).strftime("%d-%b-%Y")
+    out: list[Article] = []
+    try:
+        imap = imaplib.IMAP4_SSL("imap.gmail.com", 993)
+        imap.login(user, pw)
+    except Exception as e:
+        print(f"  ⚠️ Inbox: IMAP login failed: {e}")
+        return []
+    try:
+        for label in labels:
+            try:
+                status, _ = imap.select(f'"{label}"', readonly=True)
+            except Exception as e:
+                status = "NO"
+            if status != "OK":
+                print(f"  ⚠️ Inbox: label {label!r} not found (create it in Gmail and filter mail into it)")
+                continue
+            status, data = imap.search(None, f'(SINCE {since})')
+            ids = data[0].split() if status == "OK" and data and data[0] else []
+            for uid in ids[-max_msgs:]:
+                status, fetched = imap.fetch(uid, "(BODY.PEEK[])")
+                if status != "OK" or not fetched or not isinstance(fetched[0], tuple):
+                    continue
+                msg = email.message_from_bytes(fetched[0][1])
+                msg_id = (msg.get("Message-ID") or "").strip() or f"{label}:{uid.decode()}:{msg.get('Date', '')}"
+                if msg_id in seen:
+                    continue
+                art = _inbox_article(msg, label, max_chars)
+                if art is None:
+                    continue
+                seen[msg_id] = datetime.now().strftime("%Y-%m-%d")
+                out.append(art)
+                print(f"  📬 {art.source}: {art.title[:70]}")
+    except Exception as e:
+        print(f"  ⚠️ Inbox: {e}")
+    finally:
+        try:
+            imap.logout()
+        except Exception:
+            pass
+    return out
+
+
+# =============================================================================
 # Hugging Face (daily papers + trending models) — covers what r/MachineLearning
 # and r/LocalLLaMA used to: public JSON API, no key, no approval.
 # =============================================================================
@@ -1506,6 +1654,15 @@ Format as punchy one-liners with source links.
 - Major scientific discoveries
 
 ---
+
+### 📬 FROM THE INBOX (Include ONLY when sources named "Newsletter · …" or "Agent · …" are present today — otherwise OMIT the section)
+Two kinds of source arrive by email and deserve more than a one-liner:
+- **Newsletters** (source "Newsletter · <writer>"): analysts' letters forwarded on purpose. Give each one a
+  sub-header with the writer's name, then 3-6 bullets that carry the writer's ACTUAL arguments and the facts
+  behind them, in the writer's framing (what they claim, why, what they'd watch). This is the one place in the
+  digest for synthesis, so do not flatten it into a single line. Link the newsletter once (its link).
+- **Agent notes** (source "Agent · <name>"): findings sent in by the reader's own agents. Relay what the agent
+  found, attributed by name, with any links it included; keep the agent's claims as its claims, not as fact.
 
 ### 📰 POPULAR ACROSS THE BOARD (Always include — 6-8 items)
 What everyone is reading today across EVERY topic, including ones outside the reader's interests: sports,
@@ -2271,6 +2428,12 @@ def main():
         print("📥 Fetching news from sources...")
         articles = fetch_all_news()
         print(f"\n✓ Fetched {len(articles)} total articles")
+
+        # Step 1a: newsletters you forward + notes from your agents (IMAP)
+        print("\n📬 Checking the inbox labels...")
+        inbox_articles = fetch_inbox_sources(history)
+        articles.extend(inbox_articles)
+        print(f"  {len(inbox_articles)} inbox item(s)")
 
         # Step 1b: Fetch Reddit thread details for any downstream consumer
         print("\n🔗 Fetching Reddit thread details...")

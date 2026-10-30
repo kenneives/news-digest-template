@@ -168,6 +168,25 @@ publisher's own link when the same story is in a direct feed.
 
 ---
 
+## From the Inbox (newsletters and agent notes)
+
+The digest reads two Gmail labels over IMAP each morning, using the same
+account and app password it sends from (no extra service): anything you forward
+into **Digest/Newsletters** and anything your agents mail into **Digest/Agents**.
+The full text (up to 6,000 characters) goes to the model as a source, and the
+prompt gives it its own section, "📬 From the Inbox", where a newsletter gets
+3-6 bullets of the writer's actual arguments and an agent note is relayed by
+name. Messages stay unread (read-only IMAP, PEEK), each is used once, and the
+section is omitted on days with nothing.
+
+Setup: in Gmail, create the two labels and a filter per sender that applies the
+label and skips the inbox. To forward a newsletter from another mailbox, add a
+rule there that forwards mail from the sender to the digest's Gmail address.
+`INBOX_ENABLED`, `INBOX_LABELS`, `INBOX_LOOKBACK_DAYS` (2), `INBOX_MAX_CHARS`
+(6000) and `INBOX_MAX_MESSAGES` (12) tune it.
+
+---
+
 ## Daily Watch Feeds (Optional)
 
 A weekly sweep has a five-day latency ceiling. For names you care about
