@@ -888,10 +888,12 @@ def write_trading_record(record: dict) -> Optional[Path]:
         tmp = final.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(record, ensure_ascii=False, indent=1), encoding="utf-8")
         os.replace(tmp, final)
+        # The folder may have other writers in the same schema; prune every
+        # source by the date in its filename, and only the contract's shape.
         keep = int(os.getenv("INBOX_TRADING_RETENTION_DAYS", "90"))
         cutoff = (datetime.now(timezone.utc) - timedelta(days=keep)).strftime("%Y%m%d")
         for f in tdir.glob("*.json"):
-            m = re.search(r"-(\d{8})-\d{6}", f.name)
+            m = re.fullmatch(r"[a-z0-9_]+-(\d{8})-\d{6}(?:-\d+)?\.json", f.name)
             if m and m.group(1) < cutoff:
                 try:
                     f.unlink()
@@ -2284,6 +2286,26 @@ def build_bot_activity_section(history: dict) -> str:
             parts.append(f"trading batch from {t['source']} [{tag}]: {t['headline']}" + ("" if t["written"] else " (NOT written)"))
         for addr in ib.get("discovered", []):
             parts.append(f"new trading sender seen, not yet allowlisted: {addr}")
+        # Files in the shared trading folder from the last 24h, any writer
+        # (this job and any other runner).
+        try:
+            since = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y%m%d-%H%M%S")
+            by_src: dict = {}
+            for f in _trading_dir().glob("*.json"):
+                m = re.fullmatch(r"([a-z0-9_]+)-(\d{8}-\d{6})(?:-\d+)?\.json", f.name)
+                if m and m.group(2) >= since:
+                    flag = ""
+                    try:
+                        rec = json.loads(f.read_text(encoding="utf-8"))
+                        flag = " run_error" if rec.get("run_error") else (f" {rec.get('attention')}" if rec.get("attention") else "")
+                    except Exception:
+                        pass
+                    by_src.setdefault(m.group(1), []).append(flag.strip())
+            if by_src:
+                parts.append("trading dashboard inbox (24h): " + ", ".join(
+                    f"{src} {len(v)}" + (f" [{', '.join(x for x in v if x)}]" if any(v) else "") for src, v in sorted(by_src.items())))
+        except Exception:
+            pass
         lines.append(f"<li><strong>Inbox</strong>: {html.escape(' · '.join(parts)) if parts else 'nothing new'}</li>")
         # 3. trading bot via the gateway
         gw = _gateway_summary()
