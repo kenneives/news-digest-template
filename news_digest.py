@@ -2288,6 +2288,21 @@ def _gateway_summary() -> Optional[dict]:
     return out
 
 
+def _dashboard_inbox() -> Optional[dict]:
+    """The trading dashboard's advisor inbox summary (GET only, loopback, no
+    auth): {"available", "unread", "unread_action", "latest_by_source": {src: item}}.
+    None when the dashboard is down or DASHBOARD_URL is blank."""
+    base = os.getenv("DASHBOARD_URL", "http://127.0.0.1:8050").strip().rstrip("/")
+    if not base:
+        return None
+    try:
+        r = requests.get(f"{base}/api/inbox", params={"limit": 5}, timeout=4)
+        data = r.json() if r.status_code == 200 else None
+        return data if isinstance(data, dict) and data.get("available") else None
+    except Exception:
+        return None
+
+
 def _fmt_money(v) -> str:
     try:
         return f"${float(v):,.0f}"
@@ -2319,9 +2334,28 @@ def build_bot_activity_section(history: dict) -> str:
             parts.append(f"trading batch from {t['source']} [{tag}]: {t['headline']}" + ("" if t["written"] else " (NOT written)"))
         for addr in ib.get("discovered", []):
             parts.append(f"new trading sender seen, not yet allowlisted: {addr}")
+        # Preferred: the trading dashboard's own unread count (items the owner
+        # and Claude have not reviewed yet). Fallback: files from the last 24h.
+        dash = _dashboard_inbox()
+        if dash is not None:
+            unread, unread_action = int(dash.get("unread") or 0), int(dash.get("unread_action") or 0)
+            line = f"advisor items awaiting review: {unread}" + (f" ({unread_action} action)" if unread_action else "")
+            for src, item in sorted((dash.get("latest_by_source") or {}).items()):
+                if not isinstance(item, dict):
+                    continue
+                tag = {"action": "ACTION", "watch": "watch", "none": "fyi"}.get(item.get("attention"), item.get("attention") or "")
+                head = (item.get("headline") or "")[:90]
+                line += f" · {src} [{tag}]: {head}" if head else f" · {src} [{tag}]"
+                if item.get("attention") == "action" and item.get("unread"):
+                    RUN_STATS["advisor_action"] = True
+            if unread_action:
+                RUN_STATS["advisor_action"] = True
+            parts.append(line)
         # Files in the shared trading folder from the last 24h, any writer
         # (this job and any other runner).
         try:
+            if dash is not None:
+                raise StopIteration   # dashboard answered; skip the file scan
             since = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y%m%d-%H%M%S")
             latest: dict = {}   # source -> (stamp, attention, headline)
             counts: dict = {}
@@ -2344,6 +2378,8 @@ def build_bot_activity_section(history: dict) -> str:
                 parts.append(f"{src} [{tag}]: {head}{more}" if head else f"{src} [{tag}]{more}")
                 if att == "action":
                     RUN_STATS["advisor_action"] = True
+        except StopIteration:
+            pass
         except Exception:
             pass
         if ib.get("error"):
