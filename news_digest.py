@@ -362,8 +362,8 @@ def load_history() -> dict:
     return {"sent_articles": {}, "last_cleanup": None}
 
 
-def save_history(history: dict) -> None:
-    """Save the history of sent articles."""
+def save_history(history: dict, sync: bool = True) -> None:
+    """Save the history of sent articles (sync=False: local file only, no EC2 copy)."""
     # Resolve and validate the write target stays within the project directory
     project_dir = Path(__file__).parent.resolve()
     target = HISTORY_FILE.resolve()
@@ -1050,9 +1050,11 @@ def _inbox_article(msg, label: str, max_chars: int) -> Optional["Article"]:
     return Article(title=subject, link=link, summary=body, source=f"{kind} · {from_name}", published=published)
 
 
-def fetch_inbox_sources(history: dict) -> list["Article"]:
+def fetch_inbox_sources(history: dict, only: Optional[set] = None) -> list["Article"]:
     """Read the configured Gmail labels over IMAP and return new messages as
-    Articles. Best-effort: any failure returns [] and prints why."""
+    Articles. Best-effort: any failure returns [] and prints why.
+    `only`: process just these labels (the --inbox-trading-only /
+    --jobs-handoff-only test commands); everything else is left unseen."""
     if os.getenv("INBOX_ENABLED", "true").lower() != "true":
         return []
     user, pw = os.getenv("GMAIL_ADDRESS", "").strip(), os.getenv("GMAIL_APP_PASSWORD", "").strip()
@@ -1073,6 +1075,8 @@ def fetch_inbox_sources(history: dict) -> list["Article"]:
     # so the owner can copy it into INBOX_TRADING_SENDERS.
     if trading_label and trading_label not in labels:
         labels.append(trading_label)
+    if only:
+        labels = [l for l in labels if l in only]
     seen_senders: dict = history.setdefault("inbox_trading_senders_seen", {})
     in_digest = os.getenv("INBOX_TRADING_IN_DIGEST", "false").lower() == "true"
     lookback = int(os.getenv("INBOX_LOOKBACK_DAYS", "2"))
@@ -3222,6 +3226,53 @@ def main():
         sys.exit(1)
 
 
+def inbox_trading_only() -> None:
+    """Process ONLY the trading label: write trading-inbox.v1 files for
+    allowlisted senders (creating inbox/trading/ if missing), mark those
+    messages seen, save history locally. No model, no digest, no hand-off.
+    For end-to-end tests of the trading inbox outside the 08:08 run."""
+    label = os.getenv("INBOX_TRADING_LABEL", "Digest/Trading").strip()
+    senders = trading_senders()
+    tdir = _trading_dir()
+    tdir.mkdir(parents=True, exist_ok=True)
+    print(f"Trading inbox test: label {label!r} → {tdir}")
+    if not senders:
+        print("  INBOX_TRADING_SENDERS is empty: DISCOVERY mode, nothing will be written. "
+              "Add INBOX_TRADING_SENDERS=<source>:<address>[,…] to .env and rerun.")
+    else:
+        print("  allowlist: " + ", ".join(f"{src} <{addr}>" for addr, src in senders.items()))
+    history = load_history()
+    fetch_inbox_sources(history, only={label})
+    save_history(history, sync=False)
+    written = RUN_STATS["inbox"]["trading"]
+    disc = RUN_STATS["inbox"]["discovered"]
+    print(f"  done: {sum(1 for w in written if w['written'])} file(s) written, "
+          f"{sum(1 for w in written if not w['written'])} failed, {len(disc)} non-allowlisted sender(s) seen"
+          + (f" ({', '.join(disc)})" if disc else "") + f"; folder now holds {len(list(tdir.glob('*.json')))} file(s)")
+    if RUN_STATS["inbox"].get("error") or RUN_STATS["inbox"].get("missing_labels"):
+        print(f"  ⚠️ {RUN_STATS['inbox'].get('error') or ''} {RUN_STATS['inbox'].get('missing_labels') or ''}".rstrip())
+
+
+def jobs_handoff_only() -> None:
+    """Process ONLY the jobs label and send today's [jobs] hand-off with the
+    agent notes alone (no digest sections, no model). Marks those messages
+    seen so tomorrow's run does not forward them again."""
+    label = os.getenv("INBOX_JOBS_LABEL", "Digest/Jobs").strip()
+    if not os.getenv("JOB_RADAR_EMAIL_TO", "").strip():
+        print("JOB_RADAR_EMAIL_TO is not set in .env — nothing to send to."); return
+    print(f"Jobs hand-off test: label {label!r} → {os.getenv('JOB_RADAR_EMAIL_TO')}")
+    history = load_history()
+    fetch_inbox_sources(history, only={label})
+    notes = RUN_STATS["inbox"]["job_notes"]
+    if not notes:
+        print("  no new job notes under that label (already seen, or none in the last INBOX_LOOKBACK_DAYS) — nothing sent")
+        return
+    if send_job_radar_email(""):
+        save_history(history, sync=False)
+    else:
+        print("  send failed; messages left unseen so the next run retries")
+
+
 def inbox_peek(label: str = "Digest/Trading", n: int = 1) -> None:
     """Print the newest n messages under a Gmail label as the inbox parser sees
     them (headers, parsed trading fields, body preview). Read-only; writes
@@ -3258,5 +3309,9 @@ def inbox_peek(label: str = "Digest/Trading", n: int = 1) -> None:
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--inbox-peek":
         inbox_peek(sys.argv[2] if len(sys.argv) > 2 else "Digest/Trading", int(sys.argv[3]) if len(sys.argv) > 3 else 1)
+    elif len(sys.argv) > 1 and sys.argv[1] == "--inbox-trading-only":
+        inbox_trading_only()
+    elif len(sys.argv) > 1 and sys.argv[1] == "--jobs-handoff-only":
+        jobs_handoff_only()
     else:
         main()
