@@ -818,8 +818,12 @@ RUN_STATS: dict = {"inbox": {"newsletters": [], "agents": [], "trading": [], "di
 #   INBOX_TRADING_DIR=<repo>/inbox/trading   INBOX_TRADING_RETENTION_DAYS=90
 #   INBOX_TRADING_IN_DIGEST=false   (true = also hand them to the model as "Agent · <source>")
 TRADING_INBOX_SCHEMA = "trading-inbox.v1"
-_ATTENTION_RE = re.compile(r"^\s*OWNER ATTENTION:\s*(action|watch|none)\b", re.IGNORECASE | re.MULTILINE)
-_HEADLINE_RE = re.compile(r"^\s*HEADLINE:\s*(.+?)\s*$", re.IGNORECASE | re.MULTILINE)
+_ATTENTION_RE = re.compile(r"OWNER ATTENTION:\s*(action|watch|none)\b", re.IGNORECASE)
+# Headline ends at a line break, at the "<Name> Batch #N" line, or at 200 chars —
+# xAI's notification HTML can run the three header lines together on one line.
+_HEADLINE_RE = re.compile(r"HEADLINE:\s*(.+?)(?=\s*(?:\n|\r|$|[A-Z][A-Za-z]*\s+Batch\s*#\s*\d+))", re.DOTALL)
+_CONTINUE_RE = re.compile(r"continue reading|read (?:the )?(?:full|more)|view (?:the )?(?:full|in grok)|open in grok", re.IGNORECASE)
+_FOOTER_RE = re.compile(r"\n?\s*(?:Continue reading|Manage automation|Unsubscribe)\b.*\Z", re.IGNORECASE | re.DOTALL)
 _BATCH_RE = re.compile(r"Batch\s*#\s*\d+\s*[-–—]\s*[A-Za-z]{3}\s+(\d{1,2})/(\d{1,2})", re.IGNORECASE)
 _JSON_FENCE_RE = re.compile(r"```json\s*\n(.*?)\n\s*```", re.IGNORECASE | re.DOTALL)
 
@@ -862,10 +866,18 @@ def _json_attachments(msg) -> list:
     return out
 
 
-def trading_record(msg, source: str, text: str, received_at: datetime) -> dict:
-    """Build a trading-inbox.v1 record from a parsed message. Pure; testable."""
+def trading_record(msg, source: str, text: str, received_at: datetime, link: str = "") -> dict:
+    """Build a trading-inbox.v1 record from a parsed message. Pure; testable.
+    Notification wrappers (xAI's "Grok / … is ready / <title> … Continue reading …
+    Manage automation · Unsubscribe") are trimmed: body_text starts at the first
+    OWNER ATTENTION line when there is one and stops before the footer."""
     subject = (_decode_hdr(msg.get("Subject")) or "")[:200]
     body = text[:200_000]
+    truncated = bool(_CONTINUE_RE.search(body)) or bool(link and _CONTINUE_RE.search(link) is None and "continue" in body.lower())
+    start = re.search(r"OWNER ATTENTION:", body, re.IGNORECASE)
+    if start and start.start() > 0:
+        body = body[start.start():]
+    body = _FOOTER_RE.sub("", body).rstrip()
     m = _ATTENTION_RE.search(body)
     attention = m.group(1).lower() if m else "watch"
     m = _HEADLINE_RE.search(body)
@@ -894,6 +906,9 @@ def trading_record(msg, source: str, text: str, received_at: datetime) -> dict:
         "headline": headline,
         "body_text": body,
         "json_blocks": blocks,
+        # Additive: where the full batch lives when the email is only a preview
+        "link": link or None,
+        "truncated": bool(truncated or (link and len(body) < 2000)),
     }
 
 
@@ -963,7 +978,8 @@ def _message_text(msg) -> tuple[str, str]:
     if html_body:
         soup = BeautifulSoup(html_body, "html.parser")
         for a in soup.find_all("a", href=True):
-            if _VIEW_ONLINE_RE.search(a.get_text(" ", strip=True) or ""):
+            label = a.get_text(" ", strip=True) or ""
+            if _VIEW_ONLINE_RE.search(label) or _CONTINUE_RE.search(label):
                 link = a["href"].strip()
                 break
         if not plain:
@@ -1084,14 +1100,14 @@ def fetch_inbox_sources(history: dict) -> list["Article"]:
                         print(f"  ⛔ Trading inbox: dropped message from non-allowlisted sender {from_addr!r}")
                         seen[msg_id] = datetime.now().strftime("%Y-%m-%d")
                         continue
-                    text, _ = _message_text(msg)
+                    text, more_link = _message_text(msg)
                     try:
                         received = email.utils.parsedate_to_datetime(msg.get("Date") or "")
                         if received.tzinfo is None:
                             received = received.replace(tzinfo=timezone.utc)
                     except Exception:
                         received = datetime.now(timezone.utc)
-                    rec = trading_record(msg, source, text or "", received)
+                    rec = trading_record(msg, source, text or "", received, link=more_link)
                     path = write_trading_record(rec)
                     seen[msg_id] = datetime.now().strftime("%Y-%m-%d")
                     RUN_STATS["inbox"]["trading"].append({"source": source, "attention": rec["attention"],
@@ -3161,5 +3177,36 @@ def main():
         sys.exit(1)
 
 
+def inbox_peek(label: str = "Digest/Trading", n: int = 1) -> None:
+    """Print the newest n messages under a Gmail label as the inbox parser sees
+    them (headers, parsed trading fields, body preview). Read-only; writes
+    nothing, marks nothing. For checking a new sender's email shape."""
+    user, pw = os.getenv("GMAIL_ADDRESS", "").strip(), os.getenv("GMAIL_APP_PASSWORD", "").strip()
+    imap = imaplib.IMAP4_SSL("imap.gmail.com", 993)
+    imap.login(user, pw)
+    status, _ = imap.select(f'"{label}"', readonly=True)
+    if status != "OK":
+        print(f"label {label!r} not found"); return
+    status, data = imap.search(None, "ALL")
+    ids = data[0].split()[-n:] if status == "OK" and data and data[0] else []
+    for uid in reversed(ids):
+        status, fetched = imap.fetch(uid, "(BODY.PEEK[])")
+        msg = email.message_from_bytes(fetched[0][1])
+        text, link = _message_text(msg)
+        print("=" * 70)
+        print("From:   ", _decode_hdr(msg.get("From")))
+        print("Subject:", _decode_hdr(msg.get("Subject")))
+        print("Date:   ", msg.get("Date"), "| parts:", [p.get_content_type() for p in msg.walk()][:6])
+        print("Continue-reading link:", link or "(none)")
+        rec = trading_record(msg, "peek", text, datetime.now(timezone.utc), link=link)
+        print("Parsed: attention=%r headline=%r batch_date=%r truncated=%r json_blocks=%d" % (
+            rec["attention"], rec["headline"], rec["batch_date"], rec["truncated"], len(rec["json_blocks"])))
+        print("body_text (%d chars):" % len(rec["body_text"])); print(rec["body_text"][:1200])
+    imap.logout()
+
+
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) > 1 and sys.argv[1] == "--inbox-peek":
+        inbox_peek(sys.argv[2] if len(sys.argv) > 2 else "Digest/Trading", int(sys.argv[3]) if len(sys.argv) > 3 else 1)
+    else:
+        main()
