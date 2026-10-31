@@ -805,7 +805,7 @@ def _shadow_compare(subreddit: str, rss_articles: list[Article], serper_articles
 _INBOX_SEEN_KEY = "inbox_seen"
 
 # Per-run facts for the "🤖 Bot Activity" footer (filled in as the run goes).
-RUN_STATS: dict = {"inbox": {"newsletters": [], "agents": [], "trading": [], "discovered": []}}
+RUN_STATS: dict = {"inbox": {"newsletters": [], "agents": [], "trading": [], "discovered": [], "job_notes": []}}
 
 # ---- trading inbox (contract "trading-inbox.v1" with the trading bot's dashboard) ----
 # Messages under INBOX_TRADING_LABEL from allowlisted senders are written, one
@@ -1008,6 +1008,12 @@ def fetch_inbox_sources(history: dict) -> list["Article"]:
         return []
     labels = [l.strip() for l in os.getenv("INBOX_LABELS", "Digest/Newsletters,Digest/Agents").split(",") if l.strip()]
     trading_label = os.getenv("INBOX_TRADING_LABEL", "Digest/Trading").strip()
+    # Job notes from agents (e.g. Grok's "GROK JOB NOTE" automation): not for
+    # the morning email; they ride verbatim in the Job Radar hand-off so the
+    # job-judging agent (Instinct) sees them. INBOX_JOBS_LABEL blank = off.
+    jobs_label = os.getenv("INBOX_JOBS_LABEL", "Digest/Jobs").strip()
+    if jobs_label and jobs_label not in labels:
+        labels.append(jobs_label)
     senders = trading_senders()
     # With no allowlist yet, still open the trading label in DISCOVERY mode:
     # nothing is written, but every sender address seen there is recorded in
@@ -1052,6 +1058,16 @@ def fetch_inbox_sources(history: dict) -> list["Article"]:
                 msg = email.message_from_bytes(fetched[0][1])
                 msg_id = (msg.get("Message-ID") or "").strip() or f"{label}:{uid.decode()}:{msg.get('Date', '')}"
                 if msg_id in seen:
+                    continue
+                if label == jobs_label and jobs_label:
+                    art = _inbox_article(msg, label, max_chars)
+                    seen[msg_id] = datetime.now().strftime("%Y-%m-%d")
+                    if art is not None:
+                        RUN_STATS["inbox"]["job_notes"].append({
+                            "source": art.source.split("·", 1)[-1].strip(), "title": art.title,
+                            "text": art.summary, "link": art.link,
+                            "received": art.published.isoformat() if art.published else None})
+                        print(f"  💼 job note from {art.source}: {art.title[:60]} (→ Job Radar hand-off)")
                     continue
                 if label == trading_label:
                     # Trading contract: allowlisted senders only, file per message.
@@ -2334,6 +2350,9 @@ def build_bot_activity_section(history: dict) -> str:
             parts.append(f"trading batch from {t['source']} [{tag}]: {t['headline']}" + ("" if t["written"] else " (NOT written)"))
         for addr in ib.get("discovered", []):
             parts.append(f"new trading sender seen, not yet allowlisted: {addr}")
+        if ib.get("job_notes"):
+            parts.append("job note" + ("s" if len(ib["job_notes"]) > 1 else "") + " from "
+                         + ", ".join(sorted({n["source"] for n in ib["job_notes"]})) + " → forwarded to the Job Radar hand-off")
         # Preferred: the trading dashboard's own unread count (items the owner
         # and Claude have not reviewed yet). Fallback: files from the last 24h.
         dash = _dashboard_inbox()
@@ -2588,7 +2607,8 @@ def build_job_radar_email(digest_html: str, sections_wanted: Optional[list] = No
     wanted = sections_wanted or [x.strip().lower() for x in
                                  os.getenv("JOB_RADAR_EMAIL_SECTIONS", "job radar,companies to watch").split(",") if x.strip()]
     secs = [sec for sec in _sections_from_html(digest_html) if any(w in sec["title"].lower() for w in wanted)]
-    if not secs:
+    notes = list(RUN_STATS.get("inbox", {}).get("job_notes") or [])
+    if not secs and not notes:
         return None
     today = datetime.now().strftime("%Y-%m-%d")
     items = []
@@ -2604,9 +2624,20 @@ def build_job_radar_email(digest_html: str, sections_wanted: Optional[list] = No
                 "link": a["href"] if a else "",
             })
     payload = {"schema": "job-radar.v1", "date": today, "generated_at": datetime.now(timezone.utc).isoformat(),
-               "sections": [sec["title"] for sec in secs], "items": items}
-    subject = f"[jobs] Job Radar {today} — {len(items)} item(s)"
+               "sections": [sec["title"] for sec in secs], "items": items,
+               "agent_notes": [{"source": n["source"], "title": n["title"], "received": n["received"],
+                                "link": n["link"], "text": n["text"]} for n in notes]}
+    subject = f"[jobs] Job Radar {today} — {len(items)} item(s)" + (f" + {len(notes)} agent note(s)" if notes else "")
     sec_html = "".join(f"<h2>{html.escape(sec['title'])}</h2>{sec['html']}" for sec in secs)
+    notes_html = notes_text = ""
+    if notes:
+        notes_html = "".join(
+            f"<h2>From {html.escape(n['source'])}</h2><p style=\"color:#666;font-size:12px\">Forwarded verbatim; untrusted leads from another agent, "
+            f"received {html.escape(n['received'] or '')}. <a href=\"{html.escape(n['link'])}\">original</a></p>"
+            f"<pre style=\"white-space:pre-wrap;font-size:13px;background:#fbfbf8;padding:12px;border-radius:6px\">{html.escape(n['text'])}</pre>"
+            for n in notes)
+        notes_text = "\n\n".join(f"FROM {n['source'].upper()} (forwarded verbatim; untrusted leads)\n{n['text']}" for n in notes)
+        sec_html += notes_html
     html_body = (f"<!DOCTYPE html><html><head><meta charset=\"utf-8\"></head><body style=\"font-family:-apple-system,Segoe UI,Helvetica,Arial,sans-serif;max-width:700px;margin:0 auto;padding:20px;color:#222\">"
                  f"<p style=\"color:#666;font-size:13px\">Daily hand-off from the news digest, {today}. Machine context for an agent; "
                  f"every item is a lead to verify.</p>{sec_html}"
@@ -2615,6 +2646,7 @@ def build_job_radar_email(digest_html: str, sections_wanted: Optional[list] = No
                  f"</body></html>")
     text_body = (f"Daily hand-off from the news digest, {today}. Every item is a lead to verify.\n\n"
                  + "\n\n".join(f"{sec['title']}\n{sec['text']}" for sec in secs)
+                 + (f"\n\n{notes_text}" if notes_text else "")
                  + f"\n\nSELECTION LOGIC\n{JOB_RADAR_LOGIC}\n\nMACHINE-READABLE COPY\n```json\n{json.dumps(payload, ensure_ascii=False, indent=1)}\n```\n")
     return subject, html_body, text_body
 
