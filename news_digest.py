@@ -806,19 +806,37 @@ _INBOX_SEEN_KEY = "inbox_seen"
 # One agent email can carry both news and job leads (a free grok.com account
 # allows few automations). Markers split it: the Jobs label gets the span from
 # JOB_MARK to NEWS_MARK (or the end); the Agents label gets everything else.
-JOB_MARK, NEWS_MARK = "GROK JOB NOTE", "GROK NEWS NOTE"
+JOB_MARK, NEWS_MARK, DIGEST_MARK = "GROK JOB NOTE", "GROK NEWS NOTE", "GROK DIGEST NOTE"
+_MARKER_LINE_RE = re.compile(r"^[ \t]*GROK (?:JOB|NEWS|DIGEST) NOTE[ \t]*:?[ \t]*$", re.MULTILINE)
+
+
+def strip_agent_wrapper(text: str) -> str:
+    """For non-trading labels: drop a notification preamble (xAI's "Automation ·
+    <name> / … is ready / <title>") by starting at the first GROK marker when
+    there is one, and drop the "Continue reading / Manage automation /
+    Unsubscribe" footer. Text without markers (newsletters, Instinct's
+    [digest] mail) is returned unchanged: a newsletter may say "unsubscribe"
+    anywhere, and nothing there needs trimming."""
+    t = text or ""
+    starts = [i for i in (t.find(m) for m in (DIGEST_MARK, JOB_MARK, NEWS_MARK)) if i >= 0]
+    if not starts:
+        return t
+    return _FOOTER_RE.sub("", t[min(starts):]).strip()
 
 
 def split_agent_note(text: str) -> tuple:
-    """(news_text, jobs_text) for a combined agent email; either may be ''."""
+    """(news_text, jobs_text) for a combined agent email; either may be ''.
+    The jobs span runs from JOB_MARK to NEWS_MARK (or the end) and keeps its
+    header line. Marker-only lines are removed from the news text, so a
+    preview cut before the news section yields news_text == ''."""
     t = text or ""
     i = t.find(JOB_MARK)
     if i < 0:
-        return t.strip(), ""
+        return _MARKER_LINE_RE.sub("", t).strip(), ""
     j = t.find(NEWS_MARK, i + len(JOB_MARK))
     jobs = t[i:j].strip() if j >= 0 else t[i:].strip()
-    news = (t[:i] + (t[j:] if j >= 0 else "")).strip()
-    return news, jobs
+    news = t[:i] + (t[j:] if j >= 0 else "")
+    return _MARKER_LINE_RE.sub("", news).strip(), jobs
 
 # Per-run facts for the "🤖 Bot Activity" footer (filled in as the run goes).
 RUN_STATS: dict = {"inbox": {"newsletters": [], "agents": [], "trading": [], "discovered": [], "job_notes": []}}
@@ -1013,6 +1031,7 @@ def _inbox_article(msg, label: str, max_chars: int) -> Optional["Article"]:
     from_name, from_addr = email.utils.parseaddr(_decode_hdr(msg.get("From")))
     from_name = from_name or from_addr.split("@")[0] or "unknown sender"
     text, link = _message_text(msg)
+    text = strip_agent_wrapper(text)
     if not text:
         return None
     kind = label.rsplit("/", 1)[-1].rstrip("s") or "Inbox"   # Newsletters -> Newsletter, Agents -> Agent
@@ -3228,6 +3247,11 @@ def inbox_peek(label: str = "Digest/Trading", n: int = 1) -> None:
         print("Parsed: attention=%r headline=%r batch_date=%r truncated=%r json_blocks=%d" % (
             rec["attention"], rec["headline"], rec["batch_date"], rec["truncated"], len(rec["json_blocks"])))
         print("body_text (%d chars):" % len(rec["body_text"])); print(rec["body_text"][:1200])
+        # Non-trading labels never use the fields above; show what they get instead.
+        news, jobs = split_agent_note(strip_agent_wrapper(text))
+        print("-" * 70)
+        print("Agents/Newsletters view (%d chars):" % len(news)); print(news[:800] or "(empty -> placeholder line)")
+        print("Jobs view (%d chars):" % len(jobs)); print(jobs[:800] or "(no GROK JOB NOTE span)")
     imap.logout()
 
 
