@@ -839,6 +839,29 @@ def trading_senders() -> dict:
     return out
 
 
+def _json_attachments(msg) -> list:
+    """Parsed .json attachments (advisors may attach the batch JSON instead of
+    fencing it); anything that fails to parse is skipped."""
+    out = []
+    try:
+        for part in (msg.walk() if msg.is_multipart() else []):
+            if part.get_content_disposition() != "attachment":
+                continue
+            name = (part.get_filename() or "").lower()
+            if not (name.endswith(".json") or part.get_content_type() == "application/json"):
+                continue
+            payload = part.get_payload(decode=True) or b""
+            if len(payload) > 2_000_000:
+                continue
+            try:
+                out.append(json.loads(payload.decode(part.get_content_charset() or "utf-8", errors="replace")))
+            except ValueError:
+                continue
+    except Exception:
+        pass
+    return out
+
+
 def trading_record(msg, source: str, text: str, received_at: datetime) -> dict:
     """Build a trading-inbox.v1 record from a parsed message. Pure; testable."""
     subject = (_decode_hdr(msg.get("Subject")) or "")[:200]
@@ -860,6 +883,7 @@ def trading_record(msg, source: str, text: str, received_at: datetime) -> dict:
             blocks.append(json.loads(raw))
         except ValueError:
             continue
+    blocks.extend(_json_attachments(msg))
     return {
         "schema": TRADING_INBOX_SCHEMA,
         "source": source,
@@ -2290,20 +2314,27 @@ def build_bot_activity_section(history: dict) -> str:
         # (this job and any other runner).
         try:
             since = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y%m%d-%H%M%S")
-            by_src: dict = {}
+            latest: dict = {}   # source -> (stamp, attention, headline)
+            counts: dict = {}
             for f in _trading_dir().glob("*.json"):
                 m = re.fullmatch(r"([a-z0-9_]+)-(\d{8}-\d{6})(?:-\d+)?\.json", f.name)
                 if m and m.group(2) >= since:
-                    flag = ""
+                    src, stamp = m.group(1), m.group(2)
+                    counts[src] = counts.get(src, 0) + 1
                     try:
                         rec = json.loads(f.read_text(encoding="utf-8"))
-                        flag = " run_error" if rec.get("run_error") else (f" {rec.get('attention')}" if rec.get("attention") else "")
                     except Exception:
-                        pass
-                    by_src.setdefault(m.group(1), []).append(flag.strip())
-            if by_src:
-                parts.append("trading dashboard inbox (24h): " + ", ".join(
-                    f"{src} {len(v)}" + (f" [{', '.join(x for x in v if x)}]" if any(v) else "") for src, v in sorted(by_src.items())))
+                        rec = {}
+                    att = "run_error" if rec.get("run_error") else (rec.get("attention") or "")
+                    if src not in latest or stamp > latest[src][0]:
+                        latest[src] = (stamp, att, (rec.get("headline") or "")[:90])
+            for src in sorted(latest):
+                stamp, att, head = latest[src]
+                tag = {"action": "ACTION", "watch": "watch", "none": "fyi"}.get(att, att)
+                more = f" (+{counts[src] - 1} more)" if counts[src] > 1 else ""
+                parts.append(f"{src} [{tag}]: {head}{more}" if head else f"{src} [{tag}]{more}")
+                if att == "action":
+                    RUN_STATS["advisor_action"] = True
         except Exception:
             pass
         lines.append(f"<li><strong>Inbox</strong>: {html.escape(' · '.join(parts)) if parts else 'nothing new'}</li>")
@@ -2628,7 +2659,8 @@ def send_email(html_content: str, podcast_url: str | None = None, top_topics: li
 
     # Create message
     msg = MIMEMultipart('alternative')
-    msg['Subject'] = f"📰 Daily News Digest — {datetime.now().strftime('%A, %B %d, %Y')}"
+    prefix = "🔴 Advisor action · " if RUN_STATS.get("advisor_action") else ""
+    msg['Subject'] = f"{prefix}📰 Daily News Digest — {datetime.now().strftime('%A, %B %d, %Y')}"
     msg['From'] = f"News Digest <{sender_email}>"
     msg['To'] = ', '.join(recipients)
 
