@@ -803,6 +803,22 @@ def _shadow_compare(subreddit: str, rss_articles: list[Article], serper_articles
 # =============================================================================
 
 _INBOX_SEEN_KEY = "inbox_seen"
+# One agent email can carry both news and job leads (a free grok.com account
+# allows few automations). Markers split it: the Jobs label gets the span from
+# JOB_MARK to NEWS_MARK (or the end); the Agents label gets everything else.
+JOB_MARK, NEWS_MARK = "GROK JOB NOTE", "GROK NEWS NOTE"
+
+
+def split_agent_note(text: str) -> tuple:
+    """(news_text, jobs_text) for a combined agent email; either may be ''."""
+    t = text or ""
+    i = t.find(JOB_MARK)
+    if i < 0:
+        return t.strip(), ""
+    j = t.find(NEWS_MARK, i + len(JOB_MARK))
+    jobs = t[i:j].strip() if j >= 0 else t[i:].strip()
+    news = (t[:i] + (t[j:] if j >= 0 else "")).strip()
+    return news, jobs
 
 # Per-run facts for the "🤖 Bot Activity" footer (filled in as the run goes).
 RUN_STATS: dict = {"inbox": {"newsletters": [], "agents": [], "trading": [], "discovered": [], "job_notes": []}}
@@ -1073,13 +1089,17 @@ def fetch_inbox_sources(history: dict) -> list["Article"]:
                 if status != "OK" or not fetched or not isinstance(fetched[0], tuple):
                     continue
                 msg = email.message_from_bytes(fetched[0][1])
-                msg_id = (msg.get("Message-ID") or "").strip() or f"{label}:{uid.decode()}:{msg.get('Date', '')}"
-                if msg_id in seen:
+                raw_id = (msg.get("Message-ID") or "").strip() or f"{uid.decode()}:{msg.get('Date', '')}"
+                msg_id = f"{label}|{raw_id}"      # per label: one email may legitimately sit under two labels
+                if msg_id in seen or raw_id in seen:   # raw_id: records from before per-label keys
                     continue
                 if label == jobs_label and jobs_label:
                     art = _inbox_article(msg, label, max_chars)
                     seen[msg_id] = datetime.now().strftime("%Y-%m-%d")
                     if art is not None:
+                        _, jobs_part = split_agent_note(art.summary)
+                        if jobs_part:
+                            art.summary = jobs_part
                         RUN_STATS["inbox"]["job_notes"].append({
                             "source": art.source.split("·", 1)[-1].strip(), "title": art.title,
                             "text": art.summary, "link": art.link,
@@ -1122,6 +1142,9 @@ def fetch_inbox_sources(history: dict) -> list["Article"]:
                 if art is None:
                     continue
                 seen[msg_id] = datetime.now().strftime("%Y-%m-%d")
+                news_part, jobs_part = split_agent_note(art.summary)
+                if jobs_part:
+                    art.summary = news_part or "(this message carried job leads only; they went to the Job Radar hand-off)"
                 out.append(art)
                 RUN_STATS["inbox"]["agents" if art.source.startswith("Agent") else "newsletters"].append(art.source.split("·", 1)[-1].strip())
                 print(f"  📬 {art.source}: {art.title[:70]}")
@@ -2650,7 +2673,9 @@ def build_job_radar_email(digest_html: str, sections_wanted: Optional[list] = No
     if notes:
         notes_html = "".join(
             f"<h2>From {html.escape(n['source'])}</h2><p style=\"color:#666;font-size:12px\">Forwarded verbatim; untrusted leads from another agent, "
-            f"received {html.escape(n['received'] or '')}. <a href=\"{html.escape(n['link'])}\">original</a></p>"
+            f"received {html.escape(n['received'] or '')}. "
+            + (f"The email was a preview; the full note is at <a href=\"{html.escape(n['link'])}\">{html.escape(n['link'])}</a> (may need the sender's login)." if n['link'] and 'grok.com' in n['link'] else f"<a href=\"{html.escape(n['link'])}\">original</a>")
+            + "</p>"
             f"<pre style=\"white-space:pre-wrap;font-size:13px;background:#fbfbf8;padding:12px;border-radius:6px\">{html.escape(n['text'])}</pre>"
             for n in notes)
         notes_text = "\n\n".join(f"FROM {n['source'].upper()} (forwarded verbatim; untrusted leads)\n{n['text']}" for n in notes)
