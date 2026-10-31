@@ -873,16 +873,17 @@ def trading_record(msg, source: str, text: str, received_at: datetime, link: str
     OWNER ATTENTION line when there is one and stops before the footer."""
     subject = (_decode_hdr(msg.get("Subject")) or "")[:200]
     body = text[:200_000]
-    truncated = bool(_CONTINUE_RE.search(body)) or bool(link and _CONTINUE_RE.search(link) is None and "continue" in body.lower())
+    full = body                                   # parse fields from everything…
+    truncated = bool(_CONTINUE_RE.search(full))
     start = re.search(r"OWNER ATTENTION:", body, re.IGNORECASE)
     if start and start.start() > 0:
-        body = body[start.start():]
+        body = body[start.start():]                   # …but store body_text without the wrapper
     body = _FOOTER_RE.sub("", body).rstrip()
-    m = _ATTENTION_RE.search(body)
+    m = _ATTENTION_RE.search(full)
     attention = m.group(1).lower() if m else "watch"
-    m = _HEADLINE_RE.search(body)
+    m = _HEADLINE_RE.search(full)
     headline = m.group(1)[:200] if m else re.sub(r"\s+", " ", body)[:160]
-    m = _BATCH_RE.search(subject) or _BATCH_RE.search(body)
+    m = _BATCH_RE.search(subject) or _BATCH_RE.search(full)
     batch_date = None
     if m:
         try:
