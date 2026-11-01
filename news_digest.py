@@ -1050,7 +1050,7 @@ def _inbox_article(msg, label: str, max_chars: int) -> Optional["Article"]:
     return Article(title=subject, link=link, summary=body, source=f"{kind} · {from_name}", published=published)
 
 
-def fetch_inbox_sources(history: dict, only: Optional[set] = None) -> list["Article"]:
+def fetch_inbox_sources(history: dict, only: Optional[set] = None, ignore_seen: bool = False) -> list["Article"]:
     """Read the configured Gmail labels over IMAP and return new messages as
     Articles. Best-effort: any failure returns [] and prints why.
     `only`: process just these labels (the --inbox-trading-only /
@@ -1114,7 +1114,7 @@ def fetch_inbox_sources(history: dict, only: Optional[set] = None) -> list["Arti
                 msg = email.message_from_bytes(fetched[0][1])
                 raw_id = (msg.get("Message-ID") or "").strip() or f"{uid.decode()}:{msg.get('Date', '')}"
                 msg_id = f"{label}|{raw_id}"      # per label: one email may legitimately sit under two labels
-                if msg_id in seen or raw_id in seen:   # raw_id: records from before per-label keys
+                if not ignore_seen and (msg_id in seen or raw_id in seen):   # raw_id: records from before per-label keys
                     continue
                 if label == jobs_label and jobs_label:
                     art = _inbox_article(msg, label, max_chars)
@@ -3273,6 +3273,30 @@ def jobs_handoff_only() -> None:
         print("  send failed; messages left unseen so the next run retries")
 
 
+def job_radar_resend(date: Optional[str] = None) -> None:
+    """Rebuild and resend the [jobs] hand-off for a day from its archive JSON
+    (the digest's Job Radar / Companies to Watch sections as sent) plus the
+    agent job notes under the jobs label received that day, seen or not. No
+    model call. History is not touched. For when the 08:08 run could not send
+    (JOB_RADAR_EMAIL_TO missing, SMTP failure) or the recipient lost it."""
+    date = date or datetime.now().strftime("%Y-%m-%d")
+    if not os.getenv("JOB_RADAR_EMAIL_TO", "").strip():
+        print("JOB_RADAR_EMAIL_TO is not set in .env — nothing to send to."); return
+    path = _archive_dir() / f"digest-{date}.json"
+    if not path.exists():
+        print(f"no archive for {date} at {path}"); return
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    digest_html = "".join(f"<h2>{html.escape(sec['title'])}</h2>{sec.get('html', '')}" for sec in doc.get("sections", []))
+    label = os.getenv("INBOX_JOBS_LABEL", "Digest/Jobs").strip()
+    print(f"Job Radar resend for {date}: {len(doc.get('sections', []))} archived sections; re-reading {label!r} (seen or not)")
+    fetch_inbox_sources(load_history(), only={label} if label else set(), ignore_seen=True)
+    notes = RUN_STATS["inbox"]["job_notes"]
+    same_day = [n for n in notes if (n.get("received") or "").startswith(date)]
+    RUN_STATS["inbox"]["job_notes"] = same_day or notes
+    print(f"  agent notes: {len(RUN_STATS['inbox']['job_notes'])}" + ("" if same_day or not notes else " (none dated that day; sending all in the lookback window)"))
+    send_job_radar_email(digest_html)
+
+
 def inbox_peek(label: str = "Digest/Trading", n: int = 1) -> None:
     """Print the newest n messages under a Gmail label as the inbox parser sees
     them (headers, parsed trading fields, body preview). Read-only; writes
@@ -3313,5 +3337,7 @@ if __name__ == "__main__":
         inbox_trading_only()
     elif len(sys.argv) > 1 and sys.argv[1] == "--jobs-handoff-only":
         jobs_handoff_only()
+    elif len(sys.argv) > 1 and sys.argv[1] == "--job-radar-resend":
+        job_radar_resend(sys.argv[2] if len(sys.argv) > 2 else None)
     else:
         main()
