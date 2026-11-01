@@ -506,7 +506,7 @@ def render_grid_email(digest_html: str, *, title: str, date_line: str, podcast_u
       .pill-text {{ display:none !important; }}
       .pill-icon {{ display:inline !important; }}
       .pic {{ width:100% !important; }}
-      .pic-tile {{ height:64px !important; line-height:64px !important; }}
+      .pic-tile {{ width:86% !important; }}   /* Popular tiles: a little narrower on phones, same height */
       .lbl {{ font-size:15px !important; }}
     }}
     @media (prefers-color-scheme: dark) {{
