@@ -44,7 +44,8 @@ class Item:
     title: str = ""
     link: str = ""
     source: str = ""
-    body: str = ""
+    body: str = ""          # plain text (for length checks / fallbacks)
+    body_html: str = ""     # same body with its links and emphasis kept
     image: str = ""
     name: str = ""          # bolded lead-in (Job Radar style)
     raw_html: str = ""
@@ -59,6 +60,34 @@ class Section:
 
 
 _SOURCE_RE = re.compile(r"^\s*[\(\[]\s*([^()\[\]]{2,60})\s*[\)\]]")
+_SOURCE_HTML_RE = re.compile(r"^\s*[\(\[]\s*([^()\[\]<>]{2,60})\s*[\)\]]")   # plain "(Source)" only; a linked one stays in the body
+_KEEP_TAGS = ("a", "strong", "b", "em", "i", "br")
+
+
+def _clean_body(frag_html: str) -> tuple:
+    """(html, text) for an item body: leading punctuation / <br> dropped,
+    whitespace collapsed, only links and emphasis kept (links styled for the
+    muted body colour). Nothing is dropped except markup."""
+    soup = BeautifulSoup(frag_html or "", "html.parser")
+    for img in soup.find_all("img"):
+        img.decompose()
+    for tag in soup.find_all(True):
+        if tag.name not in _KEEP_TAGS:
+            tag.unwrap()
+        elif tag.name == "a":
+            tag.attrs = {"href": tag.get("href", ""), "class": "ink",
+                         "style": f"color:{LIGHT['ink']};text-decoration:underline;text-decoration-color:{LIGHT['faint']}"}
+        elif tag.name != "br":
+            tag.attrs = {}
+    html_out = str(soup).replace("\xa0", " ")
+    html_out = re.sub(r"^(?:\s|<br\s*/?>)+", "", html_out)
+    html_out = re.sub(r"^\s*[-–—:·.,;]+\s*", "", html_out)   # "(Source). body" / "(Source), body" after the source moved up
+    html_out = re.sub(r"(?:\s|<br\s*/?>)+$", "", html_out)
+    html_out = re.sub(r"[ \t\r\n]+", " ", html_out)
+    text = re.sub(r"\s+", " ", BeautifulSoup(html_out, "html.parser").get_text(" ")).strip()
+    if not re.search(r"[A-Za-z0-9]", text):      # only a stray "." left after "(Source)." moved up
+        return "", ""
+    return html_out, text
 
 
 def _parse_item(li) -> Item:
@@ -83,28 +112,26 @@ def _parse_item(li) -> Item:
             it.name = it.title
             if a:
                 it.link = a.get("href", "")
-        # text right after the lead: "(Source)" then <br> then body
-        after = ""
-        node = lead.next_sibling
-        pieces = []
-        while node is not None:
-            pieces.append(node.get_text(" ", strip=False) if hasattr(node, "get_text") else str(node))
-            node = node.next_sibling
-        after = "".join(pieces)
-        m = _SOURCE_RE.match(after)
+        # The body is everything after the lead's OUTERMOST wrapper: for
+        # <a><strong>Title</strong></a> body, the strong's own siblings are
+        # empty and the body sits beside the <a>.
+        top = lead
+        while top.parent is not None and top.parent is not li and top.parent.name in ("a", "strong", "b", "em", "span"):
+            top = top.parent
+        after_html = "".join(str(n) for n in top.next_siblings)
+        m = _SOURCE_HTML_RE.match(after_html)
         if m:
             it.source = m.group(1).strip()
-            after = after[m.end():]
-        it.body = after
+            after_html = after_html[m.end():]
+        it.body_html = after_html
     else:
-        it.body = li.get_text(" ", strip=True)
+        it.body_html = "".join(str(n) for n in li.contents)
     if not it.link and a:
         it.link = a.get("href", "")
-    it.body = re.sub(r"^\s*[-–—:·]\s*", "", it.body.replace("\xa0", " ")).strip()
-    it.body = re.sub(r"\s+", " ", it.body)
+    it.body_html, it.body = _clean_body(it.body_html)
     if not it.title:
         it.title = it.body[:120]
-        it.body = ""
+        it.body = it.body_html = ""
     return it
 
 
@@ -188,9 +215,11 @@ def _title_link(it: Item, px: int) -> str:
     return f'<a href="{_e(it.link)}" class="ink" style="{style}">{text}</a>' if it.link else f'<span class="ink" style="{style}">{text}</span>'
 
 
-def _body(text: str, px: int) -> str:
-    return (f'<div class="muted" style="font-family:{FONT};font-size:{px}px;color:{LIGHT["muted"]};line-height:1.45;margin-top:4px">{_e(text)}</div>'
-            if text else "")
+def _body(it_or_text, px: int) -> str:
+    """Item body. Accepts an Item (body HTML with links kept) or a plain string."""
+    inner = it_or_text.body_html if isinstance(it_or_text, Item) else _e(it_or_text or "")
+    return (f'<div class="muted" style="font-family:{FONT};font-size:{px}px;color:{LIGHT["muted"]};line-height:1.45;margin-top:4px">{inner}</div>'
+            if inner else "")
 
 
 def _source(text: str) -> str:
@@ -200,33 +229,35 @@ def _source(text: str) -> str:
 
 def _card(it: Item, img_h: int, num: Optional[int] = None) -> str:
     n = f'<div class="warm" style="font-family:{FONT};font-size:11px;font-weight:700;color:{LIGHT["warm"]};margin:8px 0 6px 0">{num}</div>' if num else '<div style="height:8px"></div>'
-    return (_img(it.image, img_h, source=it.source or it.title) + n + _title_link(it, 15) + _body(it.body, 13) + _source(it.source))
+    return (_img(it.image, img_h, source=it.source or it.title) + n + _title_link(it, 15) + _body(it, 13) + _source(it.source))
 
 
 def _row(it: Item, thumb_w: int, thumb_h: int, title_px: int, body_px: int) -> str:
     return (f'<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%"><tr>'
             f'<td width="{thumb_w}" valign="top" style="width:{thumb_w}px;padding:0 12px 0 0">{_img(it.image, thumb_h, thumb_w, it.source or it.title, 5)}</td>'
-            f'<td valign="top">{_title_link(it, title_px)}{_body(it.body, body_px)}{_source(it.source)}</td></tr></table>')
+            f'<td valign="top">{_title_link(it, title_px)}{_body(it, body_px)}{_source(it.source)}</td></tr></table>')
 
 
 def _quick(it: Item, thumb: int = 56, px: int = 13) -> str:
     return (f'<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%"><tr>'
             f'<td width="{thumb}" valign="middle" style="width:{thumb}px;padding:0 10px 0 0">{_img(it.image, thumb, thumb, it.source or it.title, 5)}</td>'
-            f'<td valign="middle">{_title_link(it, px)}{_body(it.body, px - 1) if it.body and len(it.body) < 220 else ""}{_source(it.source)}</td></tr></table>')
+            f'<td valign="middle">{_title_link(it, px)}{_body(it, px - 1)}{_source(it.source)}</td></tr></table>')
 
 
 def _tile(it: Item, h: int = 92) -> str:
-    return _img(it.image, h, source=it.source or it.title) + f'<div style="height:8px"></div>' + _title_link(it, 12) + _source(it.source)
+    return _img(it.image, h, source=it.source or it.title) + f'<div style="height:8px"></div>' + _title_link(it, 12) + _body(it, 11) + _source(it.source)
 
 
 def _name_item(it: Item) -> str:
     """Bold-name list item. A parenthetical after the name here is a
     qualifier ("(ex-Volley)"), not a source, so it stays in the sentence."""
     name = _e(it.name or it.title)
-    lead = f'<a href="{_e(it.link)}" class="ink" style="font-weight:600;color:{LIGHT["ink"]};text-decoration:none">{name}</a>' if it.link else f'<strong class="ink">{name}</strong>'
-    body = (f"({it.source}) " if it.source else "") + it.body
+    # a bare bold name is not linked when the link already sits in the sentence
+    link = it.link if not (it.name and "<a " in it.body_html) else ""
+    lead = f'<a href="{_e(link)}" class="ink" style="font-weight:600;color:{LIGHT["ink"]};text-decoration:none">{name}</a>' if link else f'<strong class="ink">{name}</strong>'
+    body = (f"({_e(it.source)}) " if it.source else "") + it.body_html
     return (f'<div class="ink" style="font-family:{FONT};font-size:13px;line-height:1.45;color:{LIGHT["ink"]};margin:0 0 10px 0">'
-            f'{lead} {_e(body)}</div>')
+            f'{lead} {body}</div>')
 
 
 def _columns(cells: list[str], gap: int = 24, cls: str = "col") -> str:
@@ -257,8 +288,14 @@ def _grid(cells: list[str], per_row: int, gap: int, row_gap: int = 18, pad: bool
     return f'<div style="margin:0 0 {row_gap}px 0">' + f'</div><div style="margin:0 0 {row_gap}px 0">'.join(rows) + "</div>"
 
 
-def _section(inner: str) -> str:
-    return f'<div class="sec" style="padding:22px 0 6px 0">{inner}</div>'
+def _rule() -> str:
+    """Thin section divider: the masthead's line at 1px. Not used above boxed
+    sections (the frame already separates them) or the first section."""
+    return f'<div class="rule-ink" style="border-top:1px solid {LIGHT["ink"]};height:0;line-height:0;font-size:0;margin:0 0 18px 0">&nbsp;</div>'
+
+
+def _section(inner: str, rule: bool = False) -> str:
+    return f'<div class="sec" style="padding:22px 0 6px 0">{_rule() if rule else ""}{inner}</div>'
 
 
 def _box(inner_html: str) -> str:
@@ -285,23 +322,23 @@ def _sanitize_box_html(sec_html: str) -> str:
 
 
 # ---------------------------------------------------------------- section renderers
-def render_three(sec: Section) -> str:
+def render_three(sec: Section, rule: bool = False) -> str:
     items = sec.items or []
     cells = [_card(it, 118, i + 1) for i, it in enumerate(items)]
     if len(cells) <= 3:
         body = _columns(cells, 16) if cells else ""
     else:
         body = _columns(cells[:3], 16) + '<div style="height:18px"></div>' + _columns(cells[3:], 16)
-    return _section(_label(sec.title, LIGHT["warm"], "What happened, not what was said") + body)
+    return _section(_label(sec.title, LIGHT["warm"], "What happened, not what was said") + body, rule)
 
 
-def render_rows(sec: Section, thumb=(80, 62), title_px=13, body_px=12, label_color=None) -> str:
+def render_rows(sec: Section, thumb=(80, 62), title_px=13, body_px=12, label_color=None, rule: bool = False) -> str:
     cells = [_row(it, thumb[0], thumb[1], title_px, body_px) for it in sec.items]
-    return _section(_label(sec.title, label_color or LIGHT["ink"]) + _grid(cells, 2, 24))
+    return _section(_label(sec.title, label_color or LIGHT["ink"]) + _grid(cells, 2, 24), rule)
 
 
-def render_top(sec: Section) -> str:
-    return render_rows(sec, (92, 72), 14, 12, LIGHT["accent"])
+def render_top(sec: Section, rule: bool = False) -> str:
+    return render_rows(sec, (92, 72), 14, 12, LIGHT["accent"], rule)
 
 
 def render_quick(sec: Section) -> str:
@@ -313,9 +350,9 @@ def render_list(sec: Section) -> str:
     return _label(sec.title, LIGHT["accent"]) + "".join(_name_item(it) for it in sec.items)
 
 
-def render_tiles(sec: Section) -> str:
+def render_tiles(sec: Section, rule: bool = False) -> str:
     cells = [_tile(it) for it in sec.items]
-    return _section(_label(sec.title, LIGHT["ink"], "The world's front page, every topic") + _grid(cells, 4, 14, pad=True, cls="col-half"))
+    return _section(_label(sec.title, LIGHT["ink"], "The world's front page, every topic") + _grid(cells, 4, 14, pad=True, cls="col-half"), rule)
 
 
 def render_box(sec: Section, label_color=None) -> str:
@@ -400,12 +437,22 @@ def render_grid_email(digest_html: str, *, title: str, date_line: str, podcast_u
                       top_topics: Optional[list] = None, colophon: str = "") -> str:
     """Full HTML document for the grid layout."""
     sections = parse_sections(digest_html)
+    # Order: the model's sections, then "From the Inbox", then "Bot Activity";
+    # the podcast card follows. Those three are the boxed tail of the email.
+    tail_inbox = [s for s in sections if "from the inbox" in s.title.lower()]
+    tail_act = [s for s in sections if kind_of(s.title) == "activity"]
+    sections = [s for s in sections if s not in tail_inbox and s not in tail_act] + tail_inbox + tail_act
     rendered: list[str] = []
     consumed: set = set()
+    first = True
     for i, sec in enumerate(sections):
         if i in consumed:
             continue
         kind = kind_of(sec.title)
+        # a thin rule above every section except the first (the masthead has
+        # its own line) and boxed ones (the frame does the job)
+        rule = not first and kind not in ("box", "activity", "sweep")
+        first = False
         # pair the short lists / quick-hit sections side by side when both exist
         paired = None
         for a_key, b_key in PAIRS:
@@ -415,21 +462,24 @@ def render_grid_email(digest_html: str, *, title: str, date_line: str, podcast_u
                         paired = j
                         break
         if paired is not None and kind in ("list", "quick"):
+            # two sections side by side: each column gets its own rule, with
+            # the column gap between them so the two lines never touch
             other = sections[paired]
             fn = render_list if kind == "list" else render_quick
-            rendered.append(_section(_columns([fn(sec), fn(other)], 24)))
+            r = _rule() if rule else ""
+            rendered.append(_section(_columns([r + fn(sec), r + fn(other)], 24)))
             consumed.add(paired)
             continue
         if kind == "three":
-            rendered.append(render_three(sec))
+            rendered.append(render_three(sec, rule))
         elif kind == "top":
-            rendered.append(render_top(sec))
+            rendered.append(render_top(sec, rule))
         elif kind == "list":
-            rendered.append(_section(render_list(sec)))
+            rendered.append(_section(render_list(sec), rule))
         elif kind == "quick":
-            rendered.append(_section(render_quick(sec)))
+            rendered.append(_section(render_quick(sec), rule))
         elif kind == "tiles":
-            rendered.append(render_tiles(sec))
+            rendered.append(render_tiles(sec, rule))
         elif kind == "sweep":
             rendered.append(render_sweep(sec))
         elif kind == "activity":
@@ -437,7 +487,7 @@ def render_grid_email(digest_html: str, *, title: str, date_line: str, podcast_u
         elif kind == "box":
             rendered.append(render_box(sec))
         else:
-            rendered.append(render_rows(sec))
+            rendered.append(render_rows(sec, rule=rule))
 
     body = "".join(rendered)
     L, D = LIGHT, DARK
@@ -473,5 +523,5 @@ def render_grid_email(digest_html: str, *, title: str, date_line: str, podcast_u
             f'<meta name="color-scheme" content="light dark"><meta name="supported-color-schemes" content="light dark">'
             f'<title>{_e(title)}</title><style>{css}</style></head>'
             f'<body class="wrap-body"><div class="wrap">{_masthead(title, date_line, podcast_url)}{body}'
-            f'<div style="border-top:1px solid {L["rule"]};margin-top:16px;padding-top:20px" class="card-rule">{_podcast_card(podcast_url, top_topics)}{colophon_html}</div>'
+            f'<div style="margin-top:22px">{_podcast_card(podcast_url, top_topics)}{colophon_html}</div>'
             f'</div></body></html>')
