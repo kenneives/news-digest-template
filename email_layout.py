@@ -197,14 +197,15 @@ def _label(title: str, color: str, sub: str = "") -> str:
     return s + "</div>"
 
 
-def _img(src: str, h: int, w: Optional[int] = None, source: str = "", radius: int = 6) -> str:
-    """Picture, or the no-image state: a source monogram tile. Same box either way."""
+def _img(src: str, h: int, w: Optional[int] = None, source: str = "", radius: int = 6, cls: str = "") -> str:
+    """Picture, or the no-image state: a source monogram tile. Same box either way.
+    cls: extra class (e.g. "pic-tile") for phone-only sizing."""
     wcss = f"width:{w}px;" if w else "width:100%;"
     if src:
-        return (f'<img src="{_e(src)}" alt="" class="pic" style="display:block;{wcss}height:{h}px;'
+        return (f'<img src="{_e(src)}" alt="" class="pic {cls}" style="display:block;{wcss}height:{h}px;'
                 f'object-fit:cover;border-radius:{radius}px;border:0;outline:none;text-decoration:none">')
     mono = "".join(p[0] for p in (source or "N").replace("r/", "").split()[:2] if p and p[0].isalnum()).upper() or "N"
-    return (f'<div class="tile" style="{wcss}height:{h}px;border-radius:{radius}px;background:{LIGHT["card"]};'
+    return (f'<div class="tile {cls}" style="{wcss}height:{h}px;border-radius:{radius}px;background:{LIGHT["card"]};'
             f'border:1px solid {LIGHT["rule"]};box-sizing:border-box;text-align:center;line-height:{h}px;'
             f'font-family:{FONT};font-size:{max(12, h // 4)}px;font-weight:700;letter-spacing:1px;color:{LIGHT["faint"]}">{_e(mono)}</div>')
 
@@ -245,7 +246,7 @@ def _quick(it: Item, thumb: int = 56, px: int = 13) -> str:
 
 
 def _tile(it: Item, h: int = 92) -> str:
-    return _img(it.image, h, source=it.source or it.title) + f'<div style="height:8px"></div>' + _title_link(it, 12) + _body(it, 11) + _source(it.source)
+    return _img(it.image, h, source=it.source or it.title, cls="pic-tile") + f'<div style="height:8px"></div>' + _title_link(it, 12) + _body(it, 11) + _source(it.source)
 
 
 def _name_item(it: Item) -> str:
@@ -413,11 +414,12 @@ def _masthead(title: str, date_line: str, podcast_url: Optional[str]) -> str:
     pill = ""
     if podcast_url:
         pill = (f'<a href="{_e(podcast_url)}" style="display:inline-block;padding:10px 14px;border-radius:999px;background:{LIGHT["accent"]};'
-                f'color:{LIGHT["on_accent"]};font-family:{FONT};font-size:13px;font-weight:600;text-decoration:none" class="pill">▶&nbsp; Listen</a>')
+                f'color:{LIGHT["on_accent"]};font-family:{FONT};font-size:13px;font-weight:600;line-height:1;text-decoration:none;white-space:nowrap" class="pill">'
+                f'<span class="pill-text">▶&nbsp; Listen</span><span class="pill-icon" style="display:none;font-size:18px;line-height:1">🎧</span></a>')
     return (f'<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-bottom:2px solid {LIGHT["ink"]}" class="rule-ink"><tr>'
             f'<td valign="bottom" style="padding:0 0 16px 0"><div class="ink" style="font-family:{FONT};font-size:26px;font-weight:700;letter-spacing:-.3px;color:{LIGHT["ink"]}">{_e(title)}</div>'
             f'<div class="muted" style="font-family:{FONT};font-size:13px;color:{LIGHT["muted"]};margin-top:4px">{_e(date_line)}</div></td>'
-            f'<td valign="bottom" align="right" style="padding:0 0 16px 0" class="col-pill">{pill}</td></tr></table>')
+            f'<td valign="bottom" align="right" width="1%" style="padding:0 0 16px 12px;white-space:nowrap" class="col-pill">{pill}</td></tr></table>')
 
 
 def _podcast_card(podcast_url: Optional[str], top_topics: Optional[list]) -> str:
@@ -499,8 +501,12 @@ def render_grid_email(digest_html: str, *, title: str, date_line: str, podcast_u
       .wrap {{ padding:20px 16px 24px 16px !important; }}
       .col {{ display:block !important; width:100% !important; padding:0 0 16px 0 !important; box-sizing:border-box !important; }}
       .col-half {{ display:inline-block !important; width:48% !important; padding:0 0 14px 0 !important; box-sizing:border-box !important; vertical-align:top !important; }}
-      .col-pill {{ display:block !important; text-align:left !important; padding:8px 0 16px 0 !important; }}
+      .col-pill {{ padding:0 0 16px 10px !important; }}
+      .pill {{ padding:10px 11px !important; }}
+      .pill-text {{ display:none !important; }}
+      .pill-icon {{ display:inline !important; }}
       .pic {{ width:100% !important; }}
+      .pic-tile {{ height:64px !important; line-height:64px !important; }}
       .lbl {{ font-size:15px !important; }}
     }}
     @media (prefers-color-scheme: dark) {{
