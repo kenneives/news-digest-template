@@ -3314,7 +3314,7 @@ def send_layout_preview(date: Optional[str] = None, to: Optional[str] = None) ->
     doc = json.loads(path.read_text(encoding="utf-8"))
     digest_html = "".join(f"<h2>{html.escape(sec['title'])}</h2>{sec.get('html', '')}" for sec in doc.get("sections", []))
     day = datetime.strptime(date, "%Y-%m-%d")
-    digest_title = os.getenv("DIGEST_TITLE", "Kenne's Daily Digest")
+    digest_title = os.getenv("DIGEST_TITLE", "Daily Digest")
     try:
         top_topics = extract_top_topics(digest_html)
     except Exception:
