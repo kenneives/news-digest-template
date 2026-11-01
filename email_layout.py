@@ -246,7 +246,9 @@ def _quick(it: Item, thumb: int = 56, px: int = 13) -> str:
 
 
 def _tile(it: Item, h: int = 92) -> str:
-    return _img(it.image, h, source=it.source or it.title, cls="pic-tile") + f'<div style="height:8px"></div>' + _title_link(it, 12) + _body(it, 11) + _source(it.source)
+    # picture and text share one wrapper so they wrap to the same width on phones
+    return ('<div class="tile-wrap">' + _img(it.image, h, source=it.source or it.title) + f'<div style="height:8px"></div>'
+            + _title_link(it, 12) + _body(it, 11) + _source(it.source) + '</div>')
 
 
 def _name_item(it: Item) -> str:
@@ -506,7 +508,7 @@ def render_grid_email(digest_html: str, *, title: str, date_line: str, podcast_u
       .pill-text {{ display:none !important; }}
       .pill-icon {{ display:inline !important; }}
       .pic {{ width:100% !important; }}
-      .pic-tile {{ width:86% !important; }}   /* Popular tiles: a little narrower on phones, same height */
+      .tile-wrap {{ width:86% !important; }}   /* Popular tiles: picture AND text a little narrower on phones */
       .lbl {{ font-size:15px !important; }}
     }}
     @media (prefers-color-scheme: dark) {{
