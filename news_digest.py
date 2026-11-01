@@ -3297,6 +3297,38 @@ def job_radar_resend(date: Optional[str] = None) -> None:
     send_job_radar_email(digest_html)
 
 
+def send_layout_preview(date: Optional[str] = None, to: Optional[str] = None) -> None:
+    """Re-render a day's digest from its archive JSON with the current grid
+    layout and email it as "[preview] …" to RECIPIENT_EMAIL (or `to`). No
+    model call, no feeds, nothing marked. For checking layout changes on real
+    content without waiting for the 08:08 run."""
+    date = date or datetime.now().strftime("%Y-%m-%d")
+    recipients = [r.strip() for r in (to or os.getenv("RECIPIENT_EMAIL", "")).split(",") if r.strip()]
+    if not recipients:
+        print("no recipient: set RECIPIENT_EMAIL or pass an address"); return
+    path = _archive_dir() / f"digest-{date}.json"
+    if not path.exists():
+        print(f"no archive for {date} at {path}"); return
+    if email_layout is None:
+        print("email_layout.py not importable"); return
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    digest_html = "".join(f"<h2>{html.escape(sec['title'])}</h2>{sec.get('html', '')}" for sec in doc.get("sections", []))
+    day = datetime.strptime(date, "%Y-%m-%d")
+    digest_title = os.getenv("DIGEST_TITLE", "Kenne's Daily Digest")
+    try:
+        top_topics = extract_top_topics(digest_html)
+    except Exception:
+        top_topics = []
+    outgoing = email_layout.render_grid_email(
+        digest_html, title=f"🗞️ {digest_title}",
+        date_line=f"{day.strftime('%A, %B %d, %Y')} · {doc.get('article_count', 0)} articles fed the model (layout preview)",
+        podcast_url=doc.get("podcast_url"), top_topics=top_topics,
+        colophon=f"Layout preview re-rendered {datetime.now().strftime('%A, %B %d, %Y at %H:%M')} from the {date} archive.")
+    subject = f"[preview] {digest_title} - {day.strftime('%A, %B %d, %Y')} (grid layout)"
+    ok = _smtp_send(recipients, subject, outgoing, f"Layout preview of the {date} digest; open in an HTML mail client.")
+    print(f"preview {'sent' if ok else 'FAILED'} → {', '.join(recipients)}: {subject} ({len(doc.get('sections', []))} sections)")
+
+
 def inbox_peek(label: str = "Digest/Trading", n: int = 1) -> None:
     """Print the newest n messages under a Gmail label as the inbox parser sees
     them (headers, parsed trading fields, body preview). Read-only; writes
@@ -3339,5 +3371,7 @@ if __name__ == "__main__":
         jobs_handoff_only()
     elif len(sys.argv) > 1 and sys.argv[1] == "--job-radar-resend":
         job_radar_resend(sys.argv[2] if len(sys.argv) > 2 else None)
+    elif len(sys.argv) > 1 and sys.argv[1] == "--send-preview":
+        send_layout_preview(sys.argv[2] if len(sys.argv) > 2 else None, sys.argv[3] if len(sys.argv) > 3 else None)
     else:
         main()
