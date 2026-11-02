@@ -415,9 +415,9 @@ def render_activity(sec: Section) -> str:
 def _masthead(title: str, date_line: str, podcast_url: Optional[str]) -> str:
     pill = ""
     if podcast_url:
-        pill = (f'<a href="{_e(podcast_url)}" style="display:inline-block;padding:10px 14px;border-radius:999px;background:{LIGHT["accent"]};'
-                f'color:{LIGHT["on_accent"]};font-family:{FONT};font-size:13px;font-weight:600;line-height:1;text-decoration:none;white-space:nowrap" class="pill">'
-                f'<span class="pill-text">▶&nbsp; Listen</span><span class="pill-icon" style="display:none;font-size:18px;line-height:1">🎧</span></a>')
+        # headphones-only on every screen (the "Listen now" card at the bottom carries the words)
+        pill = (f'<a href="{_e(podcast_url)}" title="Listen to today\'s podcast" style="display:inline-block;padding:10px 11px;border-radius:999px;'
+                f'background:{LIGHT["accent"]};color:{LIGHT["on_accent"]};font-family:{FONT};font-size:18px;line-height:1;text-decoration:none;white-space:nowrap" class="pill">🎧</a>')
     return (f'<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-bottom:2px solid {LIGHT["ink"]}" class="rule-ink"><tr>'
             f'<td valign="bottom" style="padding:0 0 16px 0"><div class="ink" style="font-family:{FONT};font-size:26px;font-weight:700;letter-spacing:-.3px;color:{LIGHT["ink"]}">{_e(title)}</div>'
             f'<div class="muted" style="font-family:{FONT};font-size:13px;color:{LIGHT["muted"]};margin-top:4px">{_e(date_line)}</div></td>'
@@ -504,9 +504,6 @@ def render_grid_email(digest_html: str, *, title: str, date_line: str, podcast_u
       .col {{ display:block !important; width:100% !important; padding:0 0 16px 0 !important; box-sizing:border-box !important; }}
       .col-half {{ display:inline-block !important; width:48% !important; padding:0 0 14px 0 !important; box-sizing:border-box !important; vertical-align:top !important; }}
       .col-pill {{ padding:0 0 16px 10px !important; }}
-      .pill {{ padding:10px 11px !important; }}
-      .pill-text {{ display:none !important; }}
-      .pill-icon {{ display:inline !important; }}
       .pic {{ width:100% !important; }}
       .tile-wrap {{ width:86% !important; }}   /* Popular tiles: picture AND text a little narrower on phones */
       .lbl {{ font-size:15px !important; }}
