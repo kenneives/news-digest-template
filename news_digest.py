@@ -1033,7 +1033,7 @@ _TRACKING_URL_RE = re.compile(
     r"|mlsend\.com|convertkit-mail\d*\.com|ck\.page|beehiiv\.com/[^\s()<>]*redirect|substack\.com/redirect|cmail\d*\.com"
     r"|awstrack\.me|sparkpostmail\.com|rs6\.net|exct\.net|mandrillapp\.com)[^\s()<>]*"
     r"|https?://[^\s()<>]*[?&](?:e|mc_eid|_hsenc|mkt_tok)=[^\s()<>]*", re.IGNORECASE)
-_UTM_RE = re.compile(r"([?&])utm_[a-z]+=[^&\s()<>]*&?")
+_UTM_RE = re.compile(r"([?&])(?:utm_[a-z]+=[^&\s()<>]*&?)+")
 _VIEW_ONLINE_TEXT_RE = re.compile(r"view (?:this |it )?(?:email |message |issue |edition )?(?:in|on)(?:line| (?:your )?browser| the web)\s*\(?(https?://[^\s()]+)",
                                   re.IGNORECASE)
 
