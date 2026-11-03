@@ -30,10 +30,10 @@ from bs4 import BeautifulSoup
 # ---------------------------------------------------------------- palette
 LIGHT = {"bg": "#ffffff", "ink": "#1c1c1a", "muted": "#5c5c57", "faint": "#8a8a84", "rule": "#e3e2dd",
          "card": "#f4f3ef", "tile": "#e6e4de", "accent": "#0f6e56", "warm": "#b45309", "act": "#b91c1c",
-         "notable": "#d97706", "info": "#9c9c96", "on_accent": "#ffffff"}
+         "notable": "#d97706", "info": "#9c9c96", "on_accent": "#ffffff", "pill_bg": "#0b4f3e"}
 DARK = {"bg": "#141413", "ink": "#ecebe6", "muted": "#a9a8a1", "faint": "#7f7e78", "rule": "#2e2e2b",
         "card": "#1d1d1b", "tile": "#2b2b28", "accent": "#3fbf97", "warm": "#e8a04a", "act": "#f87171",
-        "notable": "#fbbf24", "info": "#8a8a84", "on_accent": "#0b0b0a"}
+        "notable": "#fbbf24", "info": "#8a8a84", "on_accent": "#0b0b0a", "pill_bg": "#0f6e56"}
 
 FONT = "Inter,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif"
 
@@ -416,8 +416,11 @@ def _masthead(title: str, date_line: str, podcast_url: Optional[str]) -> str:
     pill = ""
     if podcast_url:
         # headphones-only on every screen (the "Listen now" card at the bottom carries the words)
+        # An emoji keeps its own colours (Apple's headphones are silver), so the
+        # circle is the part that changes: a deeper green and a bigger glyph.
         pill = (f'<a href="{_e(podcast_url)}" title="Listen to today\'s podcast" style="display:inline-block;padding:10px 11px;border-radius:999px;'
-                f'background:{LIGHT["accent"]};color:{LIGHT["on_accent"]};font-family:{FONT};font-size:18px;line-height:1;text-decoration:none;white-space:nowrap" class="pill">🎧</a>')
+                f'background:{LIGHT["pill_bg"]};border:2px solid {LIGHT["pill_bg"]};color:{LIGHT["on_accent"]};font-family:{FONT};font-size:22px;line-height:1;'
+                f'text-decoration:none;white-space:nowrap" class="pill">🎧</a>')
     return (f'<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-bottom:2px solid {LIGHT["ink"]}" class="rule-ink"><tr>'
             f'<td valign="bottom" style="padding:0 0 16px 0"><div class="ink" style="font-family:{FONT};font-size:26px;font-weight:700;letter-spacing:-.3px;color:{LIGHT["ink"]}">{_e(title)}</div>'
             f'<div class="muted" style="font-family:{FONT};font-size:13px;color:{LIGHT["muted"]};margin-top:4px">{_e(date_line)}</div></td>'
@@ -518,7 +521,7 @@ def render_grid_email(digest_html: str, *, title: str, date_line: str, podcast_u
       .card {{ background:{D['card']} !important; border-color:{D['rule']} !important; }}
       .tile {{ background:{D['card']} !important; border-color:{D['rule']} !important; color:{D['faint']} !important; }}
       .rule-ink {{ border-color:{D['ink']} !important; }}
-      .pill {{ background:{D['accent']} !important; color:{D['on_accent']} !important; }}
+      .pill {{ background:{D['pill_bg']} !important; border-color:{D['accent']} !important; }}
       .act {{ color:{D['act']} !important; }} .notable {{ color:{D['notable']} !important; }} .info {{ color:{D['info']} !important; }}
     }}
     """
