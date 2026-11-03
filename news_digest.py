@@ -1025,6 +1025,31 @@ def _message_text(msg) -> tuple[str, str]:
     return plain, link
 
 
+# Newsletter plumbing that only costs characters: Mailchimp/ConvertKit/Substack
+# click-redirectors carry a subscriber id and resolve nowhere useful for the
+# model; the plain-text part writes them as "Title (URL)" after every link.
+_TRACKING_URL_RE = re.compile(
+    r"https?://[^\s()<>]*(?:list-manage\.com|mailchi\.mp|mailchimp\.com|klclick\d*\.com|sendgrid\.net|hubspotlinks\.com"
+    r"|mlsend\.com|convertkit-mail\d*\.com|ck\.page|beehiiv\.com/[^\s()<>]*redirect|substack\.com/redirect|cmail\d*\.com"
+    r"|awstrack\.me|sparkpostmail\.com|rs6\.net|exct\.net|mandrillapp\.com)[^\s()<>]*"
+    r"|https?://[^\s()<>]*[?&](?:e|mc_eid|_hsenc|mkt_tok)=[^\s()<>]*", re.IGNORECASE)
+_UTM_RE = re.compile(r"([?&])utm_[a-z]+=[^&\s()<>]*&?")
+_VIEW_ONLINE_TEXT_RE = re.compile(r"view (?:this |it )?(?:email |message |issue |edition )?(?:in|on)(?:line| (?:your )?browser| the web)\s*\(?(https?://[^\s()]+)",
+                                  re.IGNORECASE)
+
+
+def clean_newsletter_text(text: str) -> str:
+    """Drop tracking links (with their '( … )' wrapper), bare URL-only lines
+    and the resulting blank runs. Nothing a reader would miss is removed."""
+    t = re.sub(r"\s*\(\s*(?:" + _TRACKING_URL_RE.pattern + r")\s*\)", "", text or "", flags=re.IGNORECASE)
+    t = _TRACKING_URL_RE.sub("", t)
+    t = _UTM_RE.sub(r"\1", t).replace("?)", ")").replace("&)", ")")   # real links keep their URL, lose utm_ tags
+    t = re.sub(r"(?m)^[ \t]*\(?\)?[ \t]*$\n?", "", t)      # lines left as "()" or empty
+    t = re.sub(r"[ \t]+\n", "\n", t)
+    t = re.sub(r"\n{3,}", "\n\n", t)
+    return t.strip()
+
+
 def _inbox_article(msg, label: str, max_chars: int) -> Optional["Article"]:
     """Turn one message into an Article. Pure apart from parsing; testable."""
     subject = _decode_hdr(msg.get("Subject")) or "(no subject)"
@@ -1032,6 +1057,12 @@ def _inbox_article(msg, label: str, max_chars: int) -> Optional["Article"]:
     from_name = from_name or from_addr.split("@")[0] or "unknown sender"
     text, link = _message_text(msg)
     text = strip_agent_wrapper(text)
+    if "newsletter" in label.lower():
+        if not link:                       # plain-text "View this email in your browser (URL)"
+            m = _VIEW_ONLINE_TEXT_RE.search(text)
+            link = m.group(1).rstrip(".,;)") if m else ""
+        text = clean_newsletter_text(text)
+        max_chars = int(os.getenv("INBOX_NEWSLETTER_MAX_CHARS", str(max(max_chars, 16000))))
     if not text:
         return None
     kind = label.rsplit("/", 1)[-1].rstrip("s") or "Inbox"   # Newsletters -> Newsletter, Agents -> Agent
@@ -1919,10 +1950,12 @@ Format as punchy one-liners with source links.
 
 ### 📬 FROM THE INBOX (Include ONLY when sources named "Newsletter · …" or "Agent · …" are present today — otherwise OMIT the section)
 Two kinds of source arrive by email and deserve more than a one-liner:
-- **Newsletters** (source "Newsletter · <writer>"): analysts' letters forwarded on purpose. Give each one a
-  sub-header with the writer's name, then 3-6 bullets that carry the writer's ACTUAL arguments and the facts
+- **Newsletters** (source "Newsletter · <writer>"): these are analysts' letters forwarded on purpose. Give each one
+  a sub-header with the writer's name, then 3-6 bullets that carry the writer's ACTUAL arguments and the facts
   behind them, in the writer's framing (what they claim, why, what they'd watch). This is the one place in the
-  digest for synthesis, so do not flatten it into a single line. Link the newsletter once (its link).
+  digest for synthesis, so do not flatten it into a single line. Link the newsletter once (its link). Ignore
+  sponsor blocks ("Sponsored by …", adverts) and housekeeping (subscribe, unsubscribe, forward-to-a-friend):
+  synthesize only the writer's own content.
 - **Agent notes** (source "Agent · <name>"): findings sent in by the reader's own agents. Relay what the agent
   found, attributed by name, with any links it included; keep the agent's claims as its claims, not as fact.
 
