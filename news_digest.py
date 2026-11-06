@@ -2726,6 +2726,9 @@ def build_job_radar_payload(digest_html: str, sections_wanted: Optional[list] = 
                 "link": a["href"] if a else "",
                 "links": [x["href"] for x in li.find_all("a", href=True)],   # every link in the item, in order
                 "origin": "digest",
+                # Additive: the evidence class the model put first (OPENING = a specific role reported by
+                # the linked source; WINDOW = speculative hiring-window signal); None when unlabelled.
+                "kind": (lambda t: t.split(":", 1)[0].lower() if t.upper().startswith(("OPENING", "WINDOW")) else None)(li.get_text(" ", strip=True)),
             })
     payload = {"schema": "job-radar.v1", "date": today, "generated_at": datetime.now(timezone.utc).isoformat(),
                "note": ("Daily job-search hand-off from the owner's news digest. items[] are leads the digest's "
