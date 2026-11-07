@@ -217,6 +217,10 @@ def google_news_rss_url(query: str) -> str:
 RSS_FEEDS = {
     # Tech & AI (Priority)
     "Hacker News": "https://hnrss.org/frontpage",
+    # Security press: supply-chain compromises of packages, extensions and MCP
+    # servers used by coding agents surface here first (capped in FEED_CAPS).
+    "The Hacker News": "https://feeds.feedburner.com/TheHackersNews",
+    "OWASP GenAI Security": "https://genai.owasp.org/feed/",
     "TechCrunch": "https://techcrunch.com/feed/",
     "TechCrunch AI": "https://techcrunch.com/category/artificial-intelligence/feed/",
     "Ars Technica": "https://feeds.arstechnica.com/arstechnica/index",
@@ -328,6 +332,8 @@ RSS_FEEDS = {
 # Per-feed article caps (default = MAX_ARTICLES_PER_SOURCE). The newsstand
 # feeds are breadth, not depth — a few from each section is the point.
 FEED_CAPS = {
+    "The Hacker News": 6,
+    "OWASP GenAI Security": 3,
     "Google News Top Stories": 15,
     **{name: 8 for name in RSS_FEEDS if name.startswith("Google News · ")},
 }
@@ -339,9 +345,16 @@ FEED_CAPS = {
 # (a bare company name that is also an ordinary word returns junk).
 WATCH_QUERIES: list[tuple[str, str]] = [
     # ("Watch (Acme, Example Co)", '("Acme AI" OR "Example Co") (product OR funding OR launch)'),
+    # Term-based watches catch the next incident before anyone adds a name, e.g.
+    # ("Watch (MCP incidents)", '("malicious MCP server" OR "tool poisoning" OR "MCP supply chain")'),
 ]
+WATCH_FEED_CAP = 6   # per watch query per day; a Google News query can return 100 matches
+
+
 def watch_feeds() -> list[tuple[str, str]]:
     """(source name, RSS URL) for every watch query."""
+    for name, _ in WATCH_QUERIES:
+        FEED_CAPS.setdefault(name, WATCH_FEED_CAP)
     return [(name, google_news_rss_url(q)) for name, q in WATCH_QUERIES]
 
 
@@ -1317,7 +1330,7 @@ def fetch_all_news() -> list[Article]:
     # Daily watch feeds (Google News queries for tracked names)
     for name, url in watch_feeds():
         print(f"Fetching {name}...")
-        articles = fetch_rss_feed(name, url, max_per_source)
+        articles = fetch_rss_feed(name, url, FEED_CAPS.get(name, max_per_source))
         all_articles.extend(articles)
         print(f"  Got {len(articles)} articles")
 
