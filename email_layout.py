@@ -21,6 +21,7 @@ EMAIL_LAYOUT=grid.
 from __future__ import annotations
 
 import html as H
+import os
 import re
 from dataclasses import dataclass, field
 from typing import Optional
@@ -36,6 +37,14 @@ DARK = {"bg": "#141413", "ink": "#ecebe6", "muted": "#a9a8a1", "faint": "#7f7e78
         "notable": "#fbbf24", "info": "#8a8a84", "on_accent": "#0b0b0a", "pill_bg": "#0f6e56"}
 
 FONT = "Inter,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif"
+
+# The masthead's podcast button is a white line icon (headphones with sound
+# waves) rather than the emoji, so the glyph matches the button in both modes.
+# Mail clients only show it from a public URL, so the 2x PNG is served from the
+# public template repo; point PODCAST_ICON_URL at your own copy to self-host.
+PODCAST_ICON_URL = os.environ.get(
+    "PODCAST_ICON_URL",
+    "https://raw.githubusercontent.com/kenneives/news-digest-template/main/assets/podcast-pill@2x.png")
 
 
 # ---------------------------------------------------------------- parsing
@@ -415,12 +424,14 @@ def render_activity(sec: Section) -> str:
 def _masthead(title: str, date_line: str, podcast_url: Optional[str]) -> str:
     pill = ""
     if podcast_url:
-        # headphones-only on every screen (the "Listen now" card at the bottom carries the words)
-        # An emoji keeps its own colours (Apple's headphones are silver), so the
-        # circle is the part that changes: a deeper green and a bigger glyph.
-        pill = (f'<a href="{_e(podcast_url)}" title="Listen to today\'s podcast" style="display:inline-block;padding:10px 11px;border-radius:999px;'
-                f'background:{LIGHT["pill_bg"]};border:2px solid {LIGHT["pill_bg"]};color:{LIGHT["on_accent"]};font-family:{FONT};font-size:22px;line-height:1;'
-                f'text-decoration:none;white-space:nowrap" class="pill">🎧</a>')
+        # Icon-only on every screen (the "Listen now" card at the bottom carries
+        # the words). Light: deep green oval, white icon. Dark (.mast-pill rule):
+        # charcoal oval with a mint ring, same white icon. The emoji is the alt
+        # text so a client that blocks images still shows headphones.
+        pill = (f'<a href="{_e(podcast_url)}" title="Listen to today\'s podcast" style="display:inline-block;padding:10px 15px;border-radius:999px;'
+                f'background:{LIGHT["pill_bg"]};border:2px solid {LIGHT["pill_bg"]};color:{LIGHT["on_accent"]};font-family:{FONT};font-size:22px;line-height:0;'
+                f'text-decoration:none;white-space:nowrap" class="mast-pill">'
+                f'<img src="{_e(PODCAST_ICON_URL)}" width="46" height="22" alt="🎧" style="display:block;width:46px;height:22px;border:0;outline:none;text-decoration:none"></a>')
     return (f'<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-bottom:2px solid {LIGHT["ink"]}" class="rule-ink"><tr>'
             f'<td valign="bottom" style="padding:0 0 16px 0"><div class="ink" style="font-family:{FONT};font-size:26px;font-weight:700;letter-spacing:-.3px;color:{LIGHT["ink"]}">{_e(title)}</div>'
             f'<div class="muted" style="font-family:{FONT};font-size:13px;color:{LIGHT["muted"]};margin-top:4px">{_e(date_line)}</div></td>'
@@ -522,6 +533,7 @@ def render_grid_email(digest_html: str, *, title: str, date_line: str, podcast_u
       .tile {{ background:{D['card']} !important; border-color:{D['rule']} !important; color:{D['faint']} !important; }}
       .rule-ink {{ border-color:{D['ink']} !important; }}
       .pill {{ background:{D['pill_bg']} !important; border-color:{D['accent']} !important; }}
+      .mast-pill {{ background:{D['card']} !important; border-color:{D['accent']} !important; }}
       .act {{ color:{D['act']} !important; }} .notable {{ color:{D['notable']} !important; }} .info {{ color:{D['info']} !important; }}
     }}
     """

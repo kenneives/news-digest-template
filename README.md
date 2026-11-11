@@ -260,6 +260,7 @@ docker run -d --name audiobookshelf \
 | `ELEVENLABS_API_KEY` | *(none)* | Premium TTS (falls back to Edge-TTS if unset) |
 | `ELEVENLABS_VOICE_ALEX` | *(auto-rotate)* | Pin a specific ElevenLabs voice for Alex |
 | `ELEVENLABS_VOICE_SAM` | *(auto-rotate)* | Pin a specific ElevenLabs voice for Sam |
+| `PODCAST_ICON_URL` | *(this repo's `assets/podcast-pill@2x.png`)* | Public URL of the headphones icon in the email masthead; set it to self-host (92×44 PNG, white on transparent) |
 | `ELEVENLABS_MODEL` | `eleven_multilingual_v2` | ElevenLabs model |
 | `INTRO_MUSIC_PATH` | *(none)* | MP3 file for intro music with fade-in |
 | `OUTRO_MUSIC_PATH` | *(none)* | MP3 file for outro music with fade-out |
